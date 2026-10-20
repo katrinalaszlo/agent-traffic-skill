@@ -9,11 +9,11 @@ Three steps, all plain shell and one code edit; nothing is downloaded and run. D
 
 ## 1. Get a key
 
-From the project root. Skip the first command if `.env` already has `TANSO_KEY`.
+From the repository root (in a monorepo, the workspace root is fine: the middleware finds `.env` in the directory the server starts from, its own folder, or any folder above). Skip the first command if `.env` already has `TANSO_KEY`.
 
 ```sh
 curl -fsS -X POST "https://traffic.katrinalaszlo.com/v1/signup?format=env" -H "Content-Type: application/json" -d '{"label":"<project name>","scopes":["read","write"]}' >> .env
-echo "TANSO_ACCOUNT_SALT=$(openssl rand -hex 32)" >> .env
+grep -q "^TANSO_ACCOUNT_SALT=" .env || echo "TANSO_ACCOUNT_SALT=$(openssl rand -hex 32)" >> .env
 grep -qx ".env" .gitignore 2>/dev/null || echo ".env" >> .gitignore
 ```
 
@@ -25,14 +25,16 @@ Save it next to the file that creates the Express app:
 curl -fsSL https://traffic.katrinalaszlo.com/skill/tanso-traffic.cjs -o <dir of that file>/tanso-traffic.cjs
 ```
 
+What it sends, per request, to `traffic.katrinalaszlo.com` only: the route pattern (not the URL or query), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, and an HMAC-SHA256 of the customer id keyed with a salt that stays in `.env`. No bodies, no other headers, no IPs, no raw ids. The file is about 150 lines with no dependencies; read it before adding it.
+
 Add two lines right after `const app = express()`, before auth and routes (use `import { tansoTraffic } from "./tanso-traffic.cjs"` in an ES module project):
 
 ```js
 const { tansoTraffic } = require("./tanso-traffic.cjs");
-app.use(tansoTraffic({ accountIdOf: (req) => req.user?.id }));
+app.use(tansoTraffic({ accountIdOf: (req, res) => req.user?.id }));
 ```
 
-`accountIdOf` is the one decision: return the id of the customer behind the request as this API's auth resolves it (user id, org id or API key id; it runs after the response, so values auth set are there), or `undefined` when there is none. Never a constant or a random value. Prefer an id over a secret; if the only stable customer id the app has is derived from their API key, use it (it is HMAC-hashed with the salt before it leaves the server). If you can't tell which field identifies the customer, ask the user. The middleware reads its `TANSO_` values from the environment or `.env` by itself.
+`accountIdOf(req, res)` is the one decision: return the id of the customer behind the request as this API's auth resolves it (user id, org id or API key id), or `undefined` when there is none. It runs after the response, so whatever auth set is there: `req.user`, `res.locals.user`, or wherever this app puts it. Read the auth code to find it. Never a constant or a random value. Prefer an id over a secret; if the only stable customer id the app has is derived from their API key, use it (it is HMAC-hashed with the salt before it leaves the server). If you can't tell which field identifies the customer, ask the user. The middleware reads its `TANSO_` values from the environment or `.env` by itself.
 
 ## 3. Check
 

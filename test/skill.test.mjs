@@ -131,6 +131,37 @@ describe("tansoTraffic middleware", () => {
     errors.mock.restore();
   });
 
+  test("accountIdOf gets res too, for auth that sets res.locals", async () => {
+    sent.length = 0;
+    const middleware = tansoTraffic({ key: "k", projectId: "p", salt: "s", accountIdOf: (req, res) => res.locals?.user?.id });
+    const req = fakeRequest({ route: "/a" });
+    const res = new EventEmitter();
+    middleware(req, res, () => {});
+    res.locals = { user: { id: "u_1" } };
+    res.statusCode = 200;
+    res.emit("finish");
+    mock.timers.tick(1000);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(sent[0].batch[0].account_id, createHmac("sha256", "s").update("u_1").digest("hex"));
+  });
+
+  test("on Vercel each event is sent at once and handed to waitUntil", async () => {
+    sent.length = 0;
+    const waited = [];
+    const symbol = Symbol.for("@vercel/request-context");
+    globalThis[symbol] = { get: () => ({ waitUntil: (p) => waited.push(p) }) };
+    try {
+      const middleware = tansoTraffic({ key: "k", projectId: "p" });
+      request(middleware, fakeRequest({ route: "/a" }), 200);
+      assert.equal(waited.length, 1);
+      await waited[0];
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].batch.length, 1);
+    } finally {
+      delete globalThis[symbol];
+    }
+  });
+
   test("25 events go out at once without waiting for the timer", async () => {
     sent.length = 0;
     const middleware = tansoTraffic({ key: "k", projectId: "p" });
@@ -164,6 +195,17 @@ describe("tanso-traffic.cjs as a file in a project", () => {
     });
     assert.equal((await node(dir, "cjs.cjs")).stdout, "function true true\n");
     assert.equal((await node(dir, "esm.mjs")).stdout, "function true true\n");
+  });
+
+  test("finds .env above its own folder when the server starts elsewhere (monorepo root vs app folder)", async () => {
+    const dir = project({});
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(join(dir, "apps/api/src"), { recursive: true });
+    copyFileSync(join(dir, "tanso-traffic.cjs"), join(dir, "apps/api/src/tanso-traffic.cjs"));
+    writeFileSync(join(dir, ".env"), "TANSO_KEY=ark_root\nTANSO_PROJECT_ID=p\n");
+    writeFileSync(join(dir, "apps/api/src/probe.cjs"), 'const { tansoTraffic } = require("./tanso-traffic.cjs"); console.log(typeof tansoTraffic());');
+    const other = project({});
+    assert.equal((await node(other, join(dir, "apps/api/src/probe.cjs"))).stdout, "function\n");
   });
 
   test("the environment wins over .env; with neither, it says what is missing", async () => {
