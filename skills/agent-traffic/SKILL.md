@@ -19,14 +19,14 @@ grep -qx ".env" .gitignore 2>/dev/null || echo ".env" >> .gitignore
 
 ## 2. Add the middleware
 
-Install the `agent-traffic` package in the API's package, with the project's package manager (`npm install agent-traffic`, `pnpm add agent-traffic`, `yarn add agent-traffic`; in a monorepo, in the API's workspace). It is MIT, has no dependencies, ships TypeScript types, and its source is https://github.com/katrinalaszlo/agent-traffic-skill.
+Install the `@katrinalaszlo/agent-traffic` package in the API's package, with the project's package manager (`npm install @katrinalaszlo/agent-traffic`, `pnpm add @katrinalaszlo/agent-traffic`, `yarn add @katrinalaszlo/agent-traffic`; in a monorepo, in the API's workspace). It is MIT, has no dependencies, ships TypeScript types, and its source is https://github.com/katrinalaszlo/agent-traffic-skill.
 
 What it sends, per request, to `traffic.katrinalaszlo.com` only: the route pattern (not the URL or query), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, and an HMAC-SHA256 of the customer id keyed with a salt that stays in `.env`. No bodies, no other headers, no IPs, no raw ids.
 
 Add two lines right after `const app = express()`, before auth and routes:
 
 ```js
-const { agentTraffic } = require("agent-traffic"); // or: import { agentTraffic } from "agent-traffic";
+const { agentTraffic } = require("@katrinalaszlo/agent-traffic"); // or: import { agentTraffic } from "@katrinalaszlo/agent-traffic";
 app.use(agentTraffic({ accountIdOf: (req, res) => req.user?.id }));
 ```
 

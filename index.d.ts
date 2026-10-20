@@ -1,4 +1,4 @@
-// Types for agent-traffic. Request and response are typed loosely so the package needs no @types/express and
+// Types for @katrinalaszlo/agent-traffic. Request and response are typed loosely so the package needs no @types/express and
 // accountIdOf compiles under strict mode whatever your auth adds to them.
 export interface AgentTrafficOptions {
   /** Your customer's id for this request (called after the response), or undefined when there is none. Hashed before it is sent. */

@@ -1,7 +1,7 @@
 // Agent traffic: Express middleware that sends one event per request to traffic.katrinalaszlo.com, after the
-// response is sent. npm package agent-traffic; source https://github.com/katrinalaszlo/agent-traffic-skill. Node 18+.
+// response is sent. npm package @katrinalaszlo/agent-traffic; source https://github.com/katrinalaszlo/agent-traffic-skill. Node 18+.
 //
-//   const { agentTraffic } = require("agent-traffic");   // or: import { agentTraffic } from "agent-traffic";
+//   const { agentTraffic } = require("@katrinalaszlo/agent-traffic");   // or: import { agentTraffic } from "@katrinalaszlo/agent-traffic";
 //   app.use(agentTraffic({ accountIdOf: (req, res) => req.user?.id }));
 //
 // accountIdOf returns your customer's id for the request (called with req and res after the response, so values your

@@ -1,5 +1,5 @@
 {
-  "name": "agent-traffic",
+  "name": "@katrinalaszlo/agent-traffic",
   "version": "0.1.0",
   "description": "Express middleware that shows which AI agents call your API, how their sessions go, and which errors end them.",
   "license": "MIT",
