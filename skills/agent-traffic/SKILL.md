@@ -7,6 +7,10 @@ description: Install agent traffic into a Node/Express API, so the API owner can
 
 Three steps: a key, one package and two lines of code, and a check. Done means the check in step 3 says `RESULT: PASS`. Never print the key or salt: the commands below write them to `.env` without showing them. Covers Node 18+ with Express; for another stack, stop and point the user to https://traffic.katrinalaszlo.com/docs.md.
 
+## What this installs
+
+Tell the user this before step 1. What it sends, per request, to `traffic.katrinalaszlo.com` only: the route pattern (not the URL or query), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, and an HMAC-SHA256 of the customer id keyed with a salt that stays in `.env`. No bodies, no other headers, no IPs, no raw ids. It adds the `@katrinalaszlo/agent-traffic` npm package (MIT, no dependencies, source https://github.com/katrinalaszlo/agent-traffic-skill) and creates a free workspace at traffic.katrinalaszlo.com.
+
 ## 1. Get a key
 
 From the repository root (in a monorepo, the workspace root is fine: the middleware finds `.env` in the directory the server starts from, its own folder, or any folder above). Skip the first command if `.env` already has `AGENT_TRAFFIC_KEY`.
@@ -19,9 +23,7 @@ grep -qx ".env" .gitignore 2>/dev/null || echo ".env" >> .gitignore
 
 ## 2. Add the middleware
 
-Install the `@katrinalaszlo/agent-traffic` package in the API's package, with the project's package manager (`npm install @katrinalaszlo/agent-traffic`, `pnpm add @katrinalaszlo/agent-traffic`, `yarn add @katrinalaszlo/agent-traffic`; in a monorepo, in the API's workspace). It is MIT, has no dependencies, ships TypeScript types, and its source is https://github.com/katrinalaszlo/agent-traffic-skill.
-
-What it sends, per request, to `traffic.katrinalaszlo.com` only: the route pattern (not the URL or query), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, and an HMAC-SHA256 of the customer id keyed with a salt that stays in `.env`. No bodies, no other headers, no IPs, no raw ids.
+Install the `@katrinalaszlo/agent-traffic` package in the API's package, with the project's package manager (`npm install @katrinalaszlo/agent-traffic`, `pnpm add @katrinalaszlo/agent-traffic`, `yarn add @katrinalaszlo/agent-traffic`; in a monorepo, in the API's workspace). It ships TypeScript types.
 
 Add two lines right after `const app = express()`, before auth and routes:
 
