@@ -29,9 +29,9 @@ const { agentTraffic } = require("@katrinalaszlo/agent-traffic"); // or: import 
 app.use(agentTraffic({ accountIdOf: (req, res) => req.user?.id }));
 ```
 
-Register it right after creating the app, before auth and routes. `accountIdOf` returns your customer's id (hashed before it leaves your server), or undefined. Keys come from `AGENT_TRAFFIC_KEY`, `AGENT_TRAFFIC_PROJECT_ID` and `AGENT_TRAFFIC_ACCOUNT_SALT` in the environment or `.env`; get them with the signup in [SKILL.md](skills/agent-traffic/SKILL.md).
+Register it right after creating the app, before auth and routes. `accountIdOf` returns your customer's id (hashed before it leaves your server), or undefined. Optional `errorOf(req, res)` returns error text for failed responses (400 and above, up to 200 characters), so two errors with the same status show separately. Keys come from `AGENT_TRAFFIC_KEY`, `AGENT_TRAFFIC_PROJECT_ID` and `AGENT_TRAFFIC_ACCOUNT_SALT` in the environment or `.env`; get them with the signup in [SKILL.md](skills/agent-traffic/SKILL.md).
 
-Per request it sends the route pattern, method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, and the hashed customer id. No bodies, no other headers, no IPs. Events go out in batches once a second (at once on Vercel, Lambda and Netlify), and it never blocks or fails a request. No dependencies; TypeScript types included.
+Per request it sends the route pattern, method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, the hashed customer id, and the text `errorOf` returns if you set it. No bodies, no other headers, no IPs. Events go out in batches once a second (at once on Vercel, Lambda and Netlify), and it never blocks or fails a request. No dependencies; TypeScript types included.
 
 What each event contains, and the raw HTTP API for other stacks: [traffic.katrinalaszlo.com/docs](https://traffic.katrinalaszlo.com/docs).
 

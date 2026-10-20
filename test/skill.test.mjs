@@ -145,6 +145,26 @@ describe("agentTraffic middleware", () => {
     assert.equal(sent[0].batch[0].account_id, createHmac("sha256", "s").update("u_1").digest("hex"));
   });
 
+  test("errorOf adds the error text to failed responses only, capped at 200 characters", async () => {
+    sent.length = 0;
+    const middleware = agentTraffic({ key: "k", projectId: "p", errorOf: (req, res) => res.locals?.error });
+    const fail = (status, error) => {
+      const res = new EventEmitter();
+      middleware(fakeRequest({ method: "POST", route: "/v1/charge" }), res, () => {});
+      res.locals = { error };
+      res.statusCode = status;
+      res.emit("finish");
+    };
+    fail(402, "quota_exceeded");
+    fail(402, "payment_required");
+    fail(200, "ignored on success");
+    fail(500, "x".repeat(500));
+    fail(404, undefined);
+    mock.timers.tick(1000);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(sent[0].batch.map((e) => e.properties.error), ["quota_exceeded", "payment_required", undefined, "x".repeat(200), undefined]);
+  });
+
   test("on Vercel each event is sent at once and handed to waitUntil", async () => {
     sent.length = 0;
     const waited = [];

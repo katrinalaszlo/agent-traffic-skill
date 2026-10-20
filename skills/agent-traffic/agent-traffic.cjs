@@ -5,7 +5,9 @@
 //   app.use(agentTraffic({ accountIdOf: (req, res) => req.user?.id }));
 //
 // accountIdOf returns your customer's id for the request (called with req and res after the response, so values your
-// auth set on either, such as req.user or res.locals.user, are there), or undefined. AGENT_TRAFFIC_KEY,
+// auth set on either, such as req.user or res.locals.user, are there), or undefined. errorOf, optional, returns the
+// error text for a failed response (status 400 and above), such as an error code your handler put in res.locals, so
+// two errors with the same status show as different rows in Fix next. AGENT_TRAFFIC_KEY,
 // AGENT_TRAFFIC_PROJECT_ID and AGENT_TRAFFIC_ACCOUNT_SALT come from the environment, or from a .env in the working
 // directory, this file's folder or any folder above it, when the environment lacks them; only AGENT_TRAFFIC_ lines are
 // read, nothing else in .env is touched.
@@ -19,6 +21,7 @@ const { dirname, join } = require("node:path");
 const BATCH_MAX = 25;
 const FLUSH_MS = 1000;
 const RETRIES_MAX = 3;
+const ERROR_MAX = 200;
 // On serverless hosts the process can freeze as soon as the response is sent, so a queued batch might never go out.
 // There each event is sent at once, and on Vercel the send is handed to waitUntil so the function stays up until it
 // is done (the request context @vercel/functions reads, without depending on it).
@@ -61,7 +64,7 @@ function agentTrafficEnv() {
   return values;
 }
 
-function agentTraffic({ accountIdOf, key, projectId, salt, endpoint } = {}) {
+function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } = {}) {
   const env = agentTrafficEnv();
   key ??= env.AGENT_TRAFFIC_KEY;
   projectId ??= env.AGENT_TRAFFIC_PROJECT_ID;
@@ -138,6 +141,9 @@ function agentTraffic({ accountIdOf, key, projectId, salt, endpoint } = {}) {
 
   function eventOf(req, res, occurredAt) {
     const accountId = accountIdOf ? accountIdOf(req, res) : undefined;
+    // Only for failed responses: the text that tells one 402 from another in Fix next. Capped so a long message cannot
+    // crowd a batch.
+    const error = errorOf && res.statusCode >= 400 ? errorOf(req, res) : undefined;
     return {
       idempotency_key: randomUUID(),
       name: eventName(req),
@@ -147,7 +153,7 @@ function agentTraffic({ accountIdOf, key, projectId, salt, endpoint } = {}) {
       user_agent: req.headers["user-agent"],
       accept_language: req.headers["accept-language"],
       signature_agent: req.headers["signature-agent"],
-      properties: { status_code: res.statusCode, method: req.method },
+      properties: { status_code: res.statusCode, method: req.method, ...(typeof error === "string" && error !== "" ? { error: error.slice(0, ERROR_MAX) } : {}) },
     };
   }
 }
