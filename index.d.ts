@@ -17,5 +17,5 @@ export interface AgentTrafficOptions {
 
 export function agentTraffic(options?: AgentTrafficOptions): (req: any, res: any, next: (err?: unknown) => void) => void;
 
-/** The event name for a request: its route pattern, version and "api" segments dropped, the method added for anything but GET. */
+/** The event name for a request: its route pattern without router mount prefixes, version and "api" segments dropped, the method added for anything but GET. */
 export function eventName(req: any): string;

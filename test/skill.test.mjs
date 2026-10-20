@@ -33,6 +33,16 @@ describe("eventName", () => {
       for (const method of ["GET", "DELETE"]) assert.match(eventName(fakeRequest({ method, route })), /^[a-z][a-z0-9_]{0,63}$/, `${method} ${route}`);
     }
   });
+
+  test("dynamic router mounts never put matched customer ids into event names", () => {
+    for (const baseUrl of ["/customers/customer_123", "/customers/customer_456", "/teams/team_789/customers/alice%40example.com"]) {
+      const req = fakeRequest({ baseUrl, route: "/orders/:orderId" });
+      // Parent router params need not be present on req.params unless mergeParams was enabled.
+      req.params = { orderId: "42" };
+      assert.equal(eventName(req), "orders_orderid");
+      assert.equal(eventName(fakeRequest({ method: "POST", baseUrl, route: "/" })), "post");
+    }
+  });
 });
 
 describe("agentTraffic middleware", () => {
@@ -87,6 +97,23 @@ describe("agentTraffic middleware", () => {
     assert.equal(docs.name, "docs");
     assert.equal("account_id" in docs, false);
     assert.notEqual(charge.idempotency_key, docs.idempotency_key);
+  });
+
+  test("sent events group dynamic mounts by route without sending raw ids", async () => {
+    sent.length = 0;
+    const middleware = agentTraffic({ key: "k", projectId: "p", salt: "s", accountIdOf: (req) => req.user.id });
+    for (const customerId of ["customer_123", "customer_456"]) {
+      const req = fakeRequest({ baseUrl: `/customers/${customerId}`, route: "/orders/:orderId" });
+      req.user = { id: customerId };
+      req.params = { orderId: "42" };
+      req.originalUrl = `/customers/${customerId}/orders/42?private=value`;
+      request(middleware, req, 200);
+    }
+    mock.timers.tick(1000);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(sent[0].batch.map((event) => event.name), ["orders_orderid", "orders_orderid"]);
+    assert.deepEqual(sent[0].batch.map((event) => event.account_id), ["customer_123", "customer_456"].map((id) => createHmac("sha256", "s").update(id).digest("hex")));
+    assert.doesNotMatch(sent[0].init.body, /customer_123|customer_456|private=value/);
   });
 
   test("an accountIdOf that throws loses the event and logs it; the next request still records", async () => {

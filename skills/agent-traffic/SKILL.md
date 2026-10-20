@@ -11,6 +11,8 @@ Three steps: a key, one package and two lines of code, and a check. Done means t
 
 Tell the user this before step 1. What it sends, per request, to `traffic.katrinalaszlo.com` only: the route pattern (not the URL or query), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, and an HMAC-SHA256 of the customer id keyed with a salt that stays in `.env`. No bodies, no other headers, no IPs, no raw ids. If you add `errorOf` (step 2), also the error text it returns for failed responses. It adds the `@katrinalaszlo/agent-traffic` npm package (MIT, no dependencies, source https://github.com/katrinalaszlo/agent-traffic-skill) and creates a free workspace at traffic.katrinalaszlo.com.
 
+Event names exclude router mount prefixes because they can contain raw IDs. A route `/orders/:orderId` mounted at `/customers/:customerId` records `orders_orderid`; identical route patterns under different mounts share a name.
+
 ## 1. Get a key
 
 From the repository root (in a monorepo, the workspace root is fine: the middleware finds `.env` in the directory the server starts from, its own folder, or any folder above). Skip the first command if `.env` already has `AGENT_TRAFFIC_KEY`.

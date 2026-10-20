@@ -34,7 +34,9 @@ const VERCEL_CONTEXT = Symbol.for("@vercel/request-context");
 // A request no route matched is "unmatched". Names fit the ingest rule: ^[a-z][a-z0-9_]{0,63}$.
 function eventName(req) {
   if (!req.route) return "unmatched";
-  const pattern = `${req.baseUrl ?? ""}${typeof req.route.path === "string" ? req.route.path : ""}`;
+  // Express baseUrl contains matched values, not the mount pattern: /customers/:id can become /customers/customer_123.
+  // Keep only the route pattern so mount parameters never enter event names.
+  const pattern = typeof req.route.path === "string" ? req.route.path : "";
   const segments = pattern.toLowerCase().split("/").filter((seg) => seg !== "api" && !/^v\d+$/.test(seg));
   const words = segments.flatMap((seg) => seg.split(/[^a-z0-9]+/)).filter((w) => w !== "");
   if (req.method !== "GET" && req.method !== "HEAD") words.push(req.method.toLowerCase());
