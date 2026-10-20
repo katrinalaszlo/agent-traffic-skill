@@ -34,7 +34,7 @@ app.use(agentTraffic({ accountIdOf: (req, res) => req.user?.id }));
 
 `accountIdOf(req, res)` is the one decision: return the id of the customer behind the request as this API's auth resolves it (user id, org id or API key id), or `undefined` when there is none. It runs after the response, so whatever auth set is there: `req.user`, `res.locals.user`, or wherever this app puts it. Read the auth code to find it. Never a constant or a random value. Prefer an id over a secret; if the only stable customer id the app has is derived from their API key, use it (it is HMAC-hashed with the salt before it leaves the server). If you can't tell which field identifies the customer, ask the user.
 
-Optional: if this API answers several different errors with the same status (two kinds of 402, say) and already puts an error code somewhere the response can reach, add `errorOf: (req, res) => res.locals.error` (or wherever that code lives) so they show as separate rows in Fix next. Only failed responses (400 and above) are read, up to 200 characters. Skip it if the API has no such code; do not invent one. The middleware reads its `AGENT_TRAFFIC_` values from the environment or `.env` by itself.
+Optional: if this API answers several different errors with the same status (two kinds of 402, say) with an error code in the body, set `res.locals.error = "<that code>"` next to each place it sends an error, and add `errorOf: (req, res) => res.locals.error`, so they show as separate rows in Fix next. Only failed responses (400 and above) are read, up to 200 characters. Use the codes the API already returns; do not invent new ones. The middleware reads its `AGENT_TRAFFIC_` values from the environment or `.env` by itself.
 
 ## 3. Check
 
