@@ -3,13 +3,13 @@
 export interface AgentTrafficOptions {
   /** Your customer's id for this request (called after the response), or undefined when there is none. Hashed before it is sent. */
   accountIdOf?: (req: any, res: any) => string | number | null | undefined;
-  /** Defaults to TANSO_KEY from the environment or .env. */
+  /** Defaults to AGENT_TRAFFIC_KEY from the environment or .env. */
   key?: string;
-  /** Defaults to TANSO_PROJECT_ID from the environment or .env. */
+  /** Defaults to AGENT_TRAFFIC_PROJECT_ID from the environment or .env. */
   projectId?: string;
-  /** Defaults to TANSO_ACCOUNT_SALT from the environment or .env. Required when accountIdOf is set. */
+  /** Defaults to AGENT_TRAFFIC_ACCOUNT_SALT from the environment or .env. Required when accountIdOf is set. */
   salt?: string;
-  /** Defaults to TANSO_ENDPOINT, else https://traffic.katrinalaszlo.com. */
+  /** Defaults to AGENT_TRAFFIC_ENDPOINT, else https://traffic.katrinalaszlo.com. */
   endpoint?: string;
 }
 

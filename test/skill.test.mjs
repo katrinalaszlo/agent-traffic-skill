@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
-import { eventName, agentTraffic } from "../skills/tanso-agent-traffic/tanso-traffic.cjs";
+import { eventName, agentTraffic } from "../skills/agent-traffic/agent-traffic.cjs";
 
 const run = promisify(execFile);
 
@@ -61,8 +61,8 @@ describe("agentTraffic middleware", () => {
   }
 
   test("refuses to start without key, project, or a salt for accountIdOf", () => {
-    assert.throws(() => agentTraffic({ projectId: "p" }), /needs TANSO_KEY and TANSO_PROJECT_ID/);
-    assert.throws(() => agentTraffic({ key: "k", projectId: "p", accountIdOf: () => "a" }), /needs TANSO_ACCOUNT_SALT/);
+    assert.throws(() => agentTraffic({ projectId: "p" }), /needs AGENT_TRAFFIC_KEY and AGENT_TRAFFIC_PROJECT_ID/);
+    assert.throws(() => agentTraffic({ key: "k", projectId: "p", accountIdOf: () => "a" }), /needs AGENT_TRAFFIC_ACCOUNT_SALT/);
   });
 
   test("one event per finished response, sent after a second, with status code, hashed account and headers", async () => {
@@ -172,26 +172,26 @@ describe("agentTraffic middleware", () => {
   });
 });
 
-describe("tanso-traffic.cjs as a file in a project", () => {
-  const SOURCE = new URL("../skills/tanso-agent-traffic/tanso-traffic.cjs", import.meta.url).pathname;
+describe("agent-traffic.cjs as a file in a project", () => {
+  const SOURCE = new URL("../skills/agent-traffic/agent-traffic.cjs", import.meta.url).pathname;
   const dirs = [];
   after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
   const project = (files) => {
-    const dir = mkdtempSync(join(tmpdir(), "tanso-mw-"));
+    const dir = mkdtempSync(join(tmpdir(), "agent-traffic-mw-"));
     dirs.push(dir);
-    copyFileSync(SOURCE, join(dir, "tanso-traffic.cjs"));
+    copyFileSync(SOURCE, join(dir, "agent-traffic.cjs"));
     for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
     return dir;
   };
   const node = (dir, file, env = {}) => run(process.execPath, [file], { cwd: dir, env: { PATH: process.env.PATH, ...env } });
 
-  test("reads TANSO_ lines from .env, leaves the rest of .env alone, and works with require and import", async () => {
-    const env = "DATABASE_URL=postgres://x\nTANSO_KEY=ark_k\nTANSO_PROJECT_ID=p-9\nTANSO_ACCOUNT_SALT=s\n";
-    const probe = (load) => `${load}\nconst mw = agentTraffic({ accountIdOf: () => "a" });\nconsole.log(typeof mw, process.env.DATABASE_URL === undefined, process.env.TANSO_KEY === undefined);`;
+  test("reads AGENT_TRAFFIC_ lines from .env, leaves the rest of .env alone, and works with require and import", async () => {
+    const env = "DATABASE_URL=postgres://x\nAGENT_TRAFFIC_KEY=ark_k\nAGENT_TRAFFIC_PROJECT_ID=p-9\nAGENT_TRAFFIC_ACCOUNT_SALT=s\n";
+    const probe = (load) => `${load}\nconst mw = agentTraffic({ accountIdOf: () => "a" });\nconsole.log(typeof mw, process.env.DATABASE_URL === undefined, process.env.AGENT_TRAFFIC_KEY === undefined);`;
     const dir = project({
       ".env": env,
-      "cjs.cjs": probe('const { agentTraffic } = require("./tanso-traffic.cjs");'),
-      "esm.mjs": probe('import { agentTraffic } from "./tanso-traffic.cjs";'),
+      "cjs.cjs": probe('const { agentTraffic } = require("./agent-traffic.cjs");'),
+      "esm.mjs": probe('import { agentTraffic } from "./agent-traffic.cjs";'),
     });
     assert.equal((await node(dir, "cjs.cjs")).stdout, "function true true\n");
     assert.equal((await node(dir, "esm.mjs")).stdout, "function true true\n");
@@ -201,17 +201,17 @@ describe("tanso-traffic.cjs as a file in a project", () => {
     const dir = project({});
     const { mkdirSync } = await import("node:fs");
     mkdirSync(join(dir, "apps/api/src"), { recursive: true });
-    copyFileSync(join(dir, "tanso-traffic.cjs"), join(dir, "apps/api/src/tanso-traffic.cjs"));
-    writeFileSync(join(dir, ".env"), "TANSO_KEY=ark_root\nTANSO_PROJECT_ID=p\n");
-    writeFileSync(join(dir, "apps/api/src/probe.cjs"), 'const { agentTraffic } = require("./tanso-traffic.cjs"); console.log(typeof agentTraffic());');
+    copyFileSync(join(dir, "agent-traffic.cjs"), join(dir, "apps/api/src/agent-traffic.cjs"));
+    writeFileSync(join(dir, ".env"), "AGENT_TRAFFIC_KEY=ark_root\nAGENT_TRAFFIC_PROJECT_ID=p\n");
+    writeFileSync(join(dir, "apps/api/src/probe.cjs"), 'const { agentTraffic } = require("./agent-traffic.cjs"); console.log(typeof agentTraffic());');
     const other = project({});
     assert.equal((await node(other, join(dir, "apps/api/src/probe.cjs"))).stdout, "function\n");
   });
 
   test("the environment wins over .env; with neither, it says what is missing", async () => {
-    const dir = project({ ".env": "TANSO_KEY=from_file\n", "probe.cjs": 'const { agentTraffic } = require("./tanso-traffic.cjs"); agentTraffic();' });
-    await node(dir, "probe.cjs", { TANSO_KEY: "from_env", TANSO_PROJECT_ID: "p" });
+    const dir = project({ ".env": "AGENT_TRAFFIC_KEY=from_file\n", "probe.cjs": 'const { agentTraffic } = require("./agent-traffic.cjs"); agentTraffic();' });
+    await node(dir, "probe.cjs", { AGENT_TRAFFIC_KEY: "from_env", AGENT_TRAFFIC_PROJECT_ID: "p" });
     const err = await node(dir, "probe.cjs").catch((e) => e);
-    assert.match(err.stderr, /needs TANSO_KEY and TANSO_PROJECT_ID, in the environment or in \.env/);
+    assert.match(err.stderr, /needs AGENT_TRAFFIC_KEY and AGENT_TRAFFIC_PROJECT_ID, in the environment or in \.env/);
   });
 });
