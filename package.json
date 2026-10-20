@@ -1,9 +1,21 @@
 {
-  "name": "agent-traffic-skill",
-  "private": true,
-  "type": "module",
-  "description": "Install skill and Express middleware for Tanso agent traffic",
+  "name": "agent-traffic",
+  "version": "0.1.0",
+  "description": "Express middleware that shows which AI agents call your API, how their sessions go, and which errors end them.",
   "license": "MIT",
+  "type": "module",
+  "repository": { "type": "git", "url": "git+https://github.com/katrinalaszlo/agent-traffic-skill.git" },
+  "homepage": "https://traffic.katrinalaszlo.com/docs",
+  "keywords": ["ai-agents", "express", "middleware", "analytics", "api"],
+  "main": "./skills/tanso-agent-traffic/tanso-traffic.cjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./skills/tanso-agent-traffic/tanso-traffic.cjs"
+    }
+  },
+  "files": ["skills/tanso-agent-traffic/tanso-traffic.cjs", "index.d.ts"],
   "scripts": { "test": "node --test test/*.test.mjs" },
   "engines": { "node": ">=18" }
 }

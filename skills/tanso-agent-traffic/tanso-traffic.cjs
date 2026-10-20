@@ -1,8 +1,8 @@
 // Tanso agent traffic: Express middleware that sends one event per request to Tanso, after the response is sent.
 // Source: https://github.com/katrinalaszlo/agent-traffic-skill. Node 18 or later, no dependencies.
 //
-//   const { tansoTraffic } = require("./tanso-traffic.cjs");   // or: import { tansoTraffic } from "./tanso-traffic.cjs";
-//   app.use(tansoTraffic({ accountIdOf: (req, res) => req.user?.id }));
+//   const { agentTraffic } = require("./tanso-traffic.cjs");   // or: import { agentTraffic } from "./tanso-traffic.cjs";
+//   app.use(agentTraffic({ accountIdOf: (req, res) => req.user?.id }));
 //
 // accountIdOf returns your customer's id for the request (called with req and res after the response, so values your
 // auth set on either, such as req.user or res.locals.user, are there), or undefined. TANSO_KEY, TANSO_PROJECT_ID and TANSO_ACCOUNT_SALT come from the environment, or from a .env in
@@ -59,14 +59,14 @@ function tansoEnv() {
   return values;
 }
 
-function tansoTraffic({ accountIdOf, key, projectId, salt, endpoint } = {}) {
+function agentTraffic({ accountIdOf, key, projectId, salt, endpoint } = {}) {
   const env = tansoEnv();
   key ??= env.TANSO_KEY;
   projectId ??= env.TANSO_PROJECT_ID;
   salt ??= env.TANSO_ACCOUNT_SALT;
   endpoint ??= env.TANSO_ENDPOINT ?? "https://traffic.katrinalaszlo.com";
-  if (!key || !projectId) throw new Error("tansoTraffic needs TANSO_KEY and TANSO_PROJECT_ID, in the environment or in .env.");
-  if (accountIdOf && !salt) throw new Error("tansoTraffic needs TANSO_ACCOUNT_SALT, in the environment or in .env, to hash what accountIdOf returns.");
+  if (!key || !projectId) throw new Error("agentTraffic needs TANSO_KEY and TANSO_PROJECT_ID, in the environment or in .env.");
+  if (accountIdOf && !salt) throw new Error("agentTraffic needs TANSO_ACCOUNT_SALT, in the environment or in .env, to hash what accountIdOf returns.");
   const url = `${endpoint}/v1/events?project_id=${encodeURIComponent(projectId)}`;
   let queue = [];
   let timer = null;
@@ -108,7 +108,7 @@ function tansoTraffic({ accountIdOf, key, projectId, salt, endpoint } = {}) {
     while (queue.length > 0) send(queue.splice(0, BATCH_MAX), 1);
   }
 
-  return function tansoTrafficMiddleware(req, res, next) {
+  return function agentTrafficMiddleware(req, res, next) {
     const occurredAt = new Date().toISOString();
     // Read while the request is current: the context is per request.
     const vercel = globalThis[VERCEL_CONTEXT]?.get?.();
@@ -150,4 +150,4 @@ function tansoTraffic({ accountIdOf, key, projectId, salt, endpoint } = {}) {
   }
 }
 
-module.exports = { eventName, tansoTraffic };
+module.exports = { eventName, agentTraffic };

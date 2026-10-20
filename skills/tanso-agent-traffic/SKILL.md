@@ -5,7 +5,7 @@ description: Install Tanso agent traffic into a Node/Express API, so the API own
 
 # Install Tanso agent traffic
 
-Three steps, all plain shell and one code edit; nothing is downloaded and run. Done means the check in step 3 says `RESULT: PASS`. Never print the key or salt: the commands below write them to `.env` without showing them. Covers Node 18+ with Express; for another stack, stop and point the user to https://traffic.katrinalaszlo.com/docs.md.
+Three steps: a key, one package and two lines of code, and a check. Done means the check in step 3 says `RESULT: PASS`. Never print the key or salt: the commands below write them to `.env` without showing them. Covers Node 18+ with Express; for another stack, stop and point the user to https://traffic.katrinalaszlo.com/docs.md.
 
 ## 1. Get a key
 
@@ -19,19 +19,15 @@ grep -qx ".env" .gitignore 2>/dev/null || echo ".env" >> .gitignore
 
 ## 2. Add the middleware
 
-Save it next to the file that creates the Express app:
+Install the `agent-traffic` package in the API's package, with the project's package manager (`npm install agent-traffic`, `pnpm add agent-traffic`, `yarn add agent-traffic`; in a monorepo, in the API's workspace). It is MIT, has no dependencies, ships TypeScript types, and its source is https://github.com/katrinalaszlo/agent-traffic-skill.
 
-```sh
-curl -fsSL https://traffic.katrinalaszlo.com/skill/tanso-traffic.cjs -o <dir of that file>/tanso-traffic.cjs
-```
+What it sends, per request, to `traffic.katrinalaszlo.com` only: the route pattern (not the URL or query), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, and an HMAC-SHA256 of the customer id keyed with a salt that stays in `.env`. No bodies, no other headers, no IPs, no raw ids.
 
-What it sends, per request, to `traffic.katrinalaszlo.com` only: the route pattern (not the URL or query), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, and an HMAC-SHA256 of the customer id keyed with a salt that stays in `.env`. No bodies, no other headers, no IPs, no raw ids. The file is about 150 lines with no dependencies; read it before adding it.
-
-Add two lines right after `const app = express()`, before auth and routes (use `import { tansoTraffic } from "./tanso-traffic.cjs"` in an ES module project):
+Add two lines right after `const app = express()`, before auth and routes:
 
 ```js
-const { tansoTraffic } = require("./tanso-traffic.cjs");
-app.use(tansoTraffic({ accountIdOf: (req, res) => req.user?.id }));
+const { agentTraffic } = require("agent-traffic"); // or: import { agentTraffic } from "agent-traffic";
+app.use(agentTraffic({ accountIdOf: (req, res) => req.user?.id }));
 ```
 
 `accountIdOf(req, res)` is the one decision: return the id of the customer behind the request as this API's auth resolves it (user id, org id or API key id), or `undefined` when there is none. It runs after the response, so whatever auth set is there: `req.user`, `res.locals.user`, or wherever this app puts it. Read the auth code to find it. Never a constant or a random value. Prefer an id over a secret; if the only stable customer id the app has is derived from their API key, use it (it is HMAC-hashed with the salt before it leaves the server). If you can't tell which field identifies the customer, ask the user. The middleware reads its `TANSO_` values from the environment or `.env` by itself.
