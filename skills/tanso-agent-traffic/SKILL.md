@@ -5,42 +5,51 @@ description: Install Tanso agent traffic into a Node/Express API, so the API own
 
 # Install Tanso agent traffic
 
-Three steps: run setup, add the middleware, verify. You are done only when verify prints all `PASS`. Never print, log or commit the key or salt (setup writes them to `.env` without printing them).
+Three steps, all plain shell and one code edit; nothing is downloaded and run. Done means the check in step 3 says `RESULT: PASS`. Never print the key or salt: the commands below write them to `.env` without showing them. Covers Node 18+ with Express; for another stack, stop and point the user to https://traffic.katrinalaszlo.com/docs.md.
 
-This covers Node 18+ with Express. For another stack, stop and tell the user: the raw API is at https://traffic.katrinalaszlo.com/docs.md.
+## 1. Get a key
 
-## 1. Run setup
-
-From the project root, with `--out` next to the file that creates the Express app:
+From the project root. Skip the first command if `.env` already has `TANSO_KEY`.
 
 ```sh
-curl -sS https://traffic.katrinalaszlo.com/skill/setup.mjs -o .tanso-setup.mjs && node .tanso-setup.mjs --out src/tanso-traffic.mjs; rm -f .tanso-setup.mjs
+curl -fsS -X POST "https://traffic.katrinalaszlo.com/v1/signup?format=env" -H "Content-Type: application/json" -d '{"label":"<project name>","scopes":["read","write"]}' >> .env
+echo "TANSO_ACCOUNT_SALT=$(openssl rand -hex 32)" >> .env
+grep -qx ".env" .gitignore 2>/dev/null || echo ".env" >> .gitignore
 ```
-
-It signs up (or keeps an existing `TANSO_KEY` in `.env`), writes `.env`, adds `.env` to `.gitignore`, writes the middleware (as CommonJS if the project is), and prints the exact lines to add.
 
 ## 2. Add the middleware
 
-Paste the lines setup printed right after `const app = express()`, before auth and routes. Then set `accountIdOf`, the one decision that matters: return the id of the customer behind the request, as this API's auth resolves it (user id, org id or API key id; read after the response, so values your auth sets are there). Return `undefined` when there is none. Never a constant, a random value, or the raw API key. If you can't tell which field identifies the customer, ask the user.
-
-If setup said the project does not load `.env`, start the server with `node --env-file=.env <entry file>`.
-
-## 3. Verify
-
-Start the server. Send at least 5 requests to at least 3 routes as an authenticated customer, including one that fails (4xx), some with agent headers:
+Save it next to the file that creates the Express app:
 
 ```sh
-curl -H "User-Agent: Claude-User (claude-code/2.1)" -H 'Signature-Agent: "https://claude.ai"' -H "Authorization: <test credential>" http://localhost:<port>/<route>
+curl -fsSL https://traffic.katrinalaszlo.com/skill/tanso-traffic.cjs -o <dir of that file>/tanso-traffic.cjs
+```
+
+Add two lines right after `const app = express()`, before auth and routes (use `import { tansoTraffic } from "./tanso-traffic.cjs"` in an ES module project):
+
+```js
+const { tansoTraffic } = require("./tanso-traffic.cjs");
+app.use(tansoTraffic({ accountIdOf: (req) => req.user?.id }));
+```
+
+`accountIdOf` is the one decision: return the id of the customer behind the request as this API's auth resolves it (user id, org id or API key id; it runs after the response, so values auth set are there), or `undefined` when there is none. Never a constant, a random value or the raw API key. If you can't tell which field identifies the customer, ask the user. The middleware reads its `TANSO_` values from the environment or `.env` by itself.
+
+## 3. Check
+
+Start the server, then send at least 5 requests to at least 3 routes as an authenticated customer, including one that fails (4xx), some with agent headers:
+
+```sh
+curl -H "User-Agent: Claude-User (claude-code/2.1)" -H 'Signature-Agent: "https://claude.ai"' -H "<auth header>: <test credential>" http://localhost:<port>/<route>
 ```
 
 Wait 2 seconds, then:
 
 ```sh
-curl -sS https://traffic.katrinalaszlo.com/skill/verify.mjs -o .tanso-verify.mjs && node --env-file=.env .tanso-verify.mjs; rm -f .tanso-verify.mjs
+curl -fsS -X POST https://traffic.katrinalaszlo.com/v1/install-check -H "Authorization: Bearer $(sed -n 's/^TANSO_KEY=//p' .env)"
 ```
 
-On `FAIL`, fix what the line says and repeat step 3. `WARN` lines are for the user.
+On a `FAIL` line, fix what it says and repeat step 3. `WARN` lines are for the user.
 
 ## Hand off
 
-Tell the user: the dashboard is at https://traffic.katrinalaszlo.com/login (sign in with `TANSO_KEY` from `.env`); which field `accountIdOf` returns; that production needs the three `TANSO_` values from `.env` with the same salt everywhere; and that on serverless hosts (Vercel functions, Lambda) events can be lost when the process freezes after the response.
+Tell the user: the dashboard is at https://traffic.katrinalaszlo.com/login (sign in with `TANSO_KEY` from `.env`); which field `accountIdOf` returns; that production needs the three `TANSO_` values from `.env`, with the same salt everywhere; and that on serverless hosts (Vercel functions, Lambda) events can be lost when the process freezes after the response.

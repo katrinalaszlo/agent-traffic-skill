@@ -1,11 +1,13 @@
 import { describe, test, before, after, mock } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { mkdtempSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createHmac } from "node:crypto";
-import { eventName, tansoTraffic } from "../skills/tanso-agent-traffic/tanso-traffic.mjs";
+import { eventName, tansoTraffic } from "../skills/tanso-agent-traffic/tanso-traffic.cjs";
 
 const run = promisify(execFile);
 
@@ -59,8 +61,8 @@ describe("tansoTraffic middleware", () => {
   }
 
   test("refuses to start without key, project, or a salt for accountIdOf", () => {
-    assert.throws(() => tansoTraffic({ projectId: "p" }), /key and projectId/);
-    assert.throws(() => tansoTraffic({ key: "k", projectId: "p", accountIdOf: () => "a" }), /salt/);
+    assert.throws(() => tansoTraffic({ projectId: "p" }), /needs TANSO_KEY and TANSO_PROJECT_ID/);
+    assert.throws(() => tansoTraffic({ key: "k", projectId: "p", accountIdOf: () => "a" }), /needs TANSO_ACCOUNT_SALT/);
   });
 
   test("one event per finished response, sent after a second, with status code, hashed account and headers", async () => {
@@ -139,67 +141,35 @@ describe("tansoTraffic middleware", () => {
   });
 });
 
-describe("verify.mjs", () => {
-  let server;
-  let base;
-  let paths;
-  const seen = [];
+describe("tanso-traffic.cjs as a file in a project", () => {
+  const SOURCE = new URL("../skills/tanso-agent-traffic/tanso-traffic.cjs", import.meta.url).pathname;
+  const dirs = [];
+  after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
+  const project = (files) => {
+    const dir = mkdtempSync(join(tmpdir(), "tanso-mw-"));
+    dirs.push(dir);
+    copyFileSync(SOURCE, join(dir, "tanso-traffic.cjs"));
+    for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+    return dir;
+  };
+  const node = (dir, file, env = {}) => run(process.execPath, [file], { cwd: dir, env: { PATH: process.env.PATH, ...env } });
 
-  before(async () => {
-    server = createServer((req, res) => {
-      seen.push({ method: req.method, url: req.url, auth: req.headers.authorization });
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(req.url === "/api/refresh" ? { success: true } : paths));
+  test("reads TANSO_ lines from .env, leaves the rest of .env alone, and works with require and import", async () => {
+    const env = "DATABASE_URL=postgres://x\nTANSO_KEY=ark_k\nTANSO_PROJECT_ID=p-9\nTANSO_ACCOUNT_SALT=s\n";
+    const probe = (load) => `${load}\nconst mw = tansoTraffic({ accountIdOf: () => "a" });\nconsole.log(typeof mw, process.env.DATABASE_URL === undefined, process.env.TANSO_KEY === undefined);`;
+    const dir = project({
+      ".env": env,
+      "cjs.cjs": probe('const { tansoTraffic } = require("./tanso-traffic.cjs");'),
+      "esm.mjs": probe('import { tansoTraffic } from "./tanso-traffic.cjs";'),
     });
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    base = `http://127.0.0.1:${server.address().port}`;
-  });
-  after(() => new Promise((resolve) => server.close(resolve)));
-
-  const verify = async () => {
-    const env = { ...process.env, TANSO_ENDPOINT: base, TANSO_KEY: "ark_ws_secretvalue", TANSO_PROJECT_ID: "4024c67a-7e8d-4011-a178-2600781419a8" };
-    try {
-      const { stdout } = await run(process.execPath, [new URL("../skills/tanso-agent-traffic/verify.mjs", import.meta.url).pathname], { env });
-      return { code: 0, stdout };
-    } catch (err) {
-      return { code: err.code, stdout: err.stdout + err.stderr };
-    }
-  };
-
-  const good = {
-    events: 12, unattributed_events: 2, sessions: 3, terminal_counts: { success: 2, failure: 1, unknown: 0 },
-    paths: [{ steps: ["docs", "api_keys_post", "charge_post"] }], intents: [{ intent: "api_keys_post" }], agents: [{ agent: "claude.ai" }],
-  };
-
-  test("passes a working install, refreshes first, and never prints the key", async () => {
-    paths = good;
-    seen.length = 0;
-    const { code, stdout } = await verify();
-    assert.equal(code, 0, stdout);
-    assert.match(stdout, /PASS {2}12 events/);
-    assert.match(stdout, /PASS {2}3 distinct event names/);
-    assert.doesNotMatch(stdout, /FAIL|secretvalue/);
-    assert.deepEqual(seen.map((s) => s.method), ["POST", "GET"]);
-    assert.equal(seen[1].auth, "Bearer ark_ws_secretvalue");
+    assert.equal((await node(dir, "cjs.cjs")).stdout, "function true true\n");
+    assert.equal((await node(dir, "esm.mjs")).stdout, "function true true\n");
   });
 
-  test("fails events with no account, no status codes, and one name, each with its fix", async () => {
-    paths = { ...good, unattributed_events: 12, sessions: 0, terminal_counts: { success: 0, failure: 0, unknown: 0 }, paths: [], intents: [], agents: [] };
-    let result = await verify();
-    assert.equal(result.code, 1);
-    assert.match(result.stdout, /none is in a session\. accountIdOf returned nothing/);
-    assert.match(result.stdout, /WARN {2}12 of 12 events have no account/);
-
-    paths = { ...good, terminal_counts: { success: 0, failure: 0, unknown: 3 }, paths: [{ steps: ["api_call", "api_call"] }], intents: [{ intent: "api_call" }] };
-    result = await verify();
-    assert.equal(result.code, 1);
-    assert.match(result.stdout, /No session ended with a status code/);
-    assert.match(result.stdout, /same name \(api_call\)/);
-  });
-
-  test("fails without its environment", async () => {
-    const err = await run(process.execPath, [new URL("../skills/tanso-agent-traffic/verify.mjs", import.meta.url).pathname], { env: { PATH: process.env.PATH } }).catch((e) => e);
-    assert.equal(err.code, 1);
-    assert.match(err.stderr, /TANSO_KEY and TANSO_PROJECT_ID must be set/);
+  test("the environment wins over .env; with neither, it says what is missing", async () => {
+    const dir = project({ ".env": "TANSO_KEY=from_file\n", "probe.cjs": 'const { tansoTraffic } = require("./tanso-traffic.cjs"); tansoTraffic();' });
+    await node(dir, "probe.cjs", { TANSO_KEY: "from_env", TANSO_PROJECT_ID: "p" });
+    const err = await node(dir, "probe.cjs").catch((e) => e);
+    assert.match(err.stderr, /needs TANSO_KEY and TANSO_PROJECT_ID, in the environment or in \.env/);
   });
 });
