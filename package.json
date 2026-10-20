@@ -1,0 +1,9 @@
+{
+  "name": "agent-traffic-skill",
+  "private": true,
+  "type": "module",
+  "description": "Install skill and Express middleware for Tanso agent traffic",
+  "license": "MIT",
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "engines": { "node": ">=20.6" }
+}
