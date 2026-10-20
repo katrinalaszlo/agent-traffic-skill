@@ -1,17 +1,17 @@
 // Tanso agent traffic: Express middleware that sends one event per request to Tanso, after the response is sent.
-// Source: https://traffic.katrinalaszlo.com/skill/tanso-traffic.mjs. Node 18 or later (fetch is built in).
+// Source: https://github.com/katrinalaszlo/agent-traffic-skill. Node 18 or later, no dependencies.
 //
-//   import { tansoTraffic } from "./tanso-traffic.mjs";
-//   app.use(tansoTraffic({
-//     key: process.env.TANSO_KEY,
-//     projectId: process.env.TANSO_PROJECT_ID,
-//     salt: process.env.TANSO_ACCOUNT_SALT,
-//     accountIdOf: (req) => req.user?.id,   // your customer's account id, read after your auth ran; undefined if none
-//   }));
+//   const { tansoTraffic } = require("./tanso-traffic.cjs");   // or: import { tansoTraffic } from "./tanso-traffic.cjs";
+//   app.use(tansoTraffic({ accountIdOf: (req) => req.user?.id }));
 //
-// Register it before your routes. It never blocks or fails a request: events are queued, sent in batches of up to
-// 25 once a second, and a failed batch is logged and retried with the same idempotency keys.
-import { createHmac, randomUUID } from "node:crypto";
+// accountIdOf returns your customer's id for the request (read after the response, so values your auth set are
+// there), or undefined. TANSO_KEY, TANSO_PROJECT_ID and TANSO_ACCOUNT_SALT come from the environment, or from .env in
+// the working directory when the environment lacks them; only TANSO_ lines are read, nothing else in .env is touched.
+//
+// Register it right after creating the app, before auth and routes. It never blocks or fails a request: events are
+// queued, sent in batches of up to 25 once a second, and a failed batch is logged and retried with the same keys.
+const { createHmac, randomUUID } = require("node:crypto");
+const { existsSync, readFileSync } = require("node:fs");
 
 const BATCH_MAX = 25;
 const FLUSH_MS = 1000;
@@ -21,7 +21,7 @@ const RETRIES_MAX = 3;
 // segment (v1) and "api" are dropped, and the method is appended for anything but GET:
 //   GET /v1/docs/quickstart -> docs_quickstart   POST /api/v1/api-keys -> api_keys_post   GET /v1/users/:id -> users_id
 // A request no route matched is "unmatched". Names fit Tanso's rule: ^[a-z][a-z0-9_]{0,63}$.
-export function eventName(req) {
+function eventName(req) {
   if (!req.route) return "unmatched";
   const pattern = `${req.baseUrl ?? ""}${typeof req.route.path === "string" ? req.route.path : ""}`;
   const segments = pattern.toLowerCase().split("/").filter((seg) => seg !== "api" && !/^v\d+$/.test(seg));
@@ -31,9 +31,24 @@ export function eventName(req) {
   return (name === "" ? "root" : name).slice(0, 64).replace(/_+$/, "");
 }
 
-export function tansoTraffic({ key, projectId, salt, accountIdOf, endpoint = "https://traffic.katrinalaszlo.com" }) {
-  if (!key || !projectId) throw new Error("tansoTraffic needs key and projectId (TANSO_KEY, TANSO_PROJECT_ID).");
-  if (accountIdOf && !salt) throw new Error("tansoTraffic needs salt (TANSO_ACCOUNT_SALT) to hash what accountIdOf returns.");
+// TANSO_ variables from the environment, else from ./.env.
+function tansoEnv() {
+  const values = {};
+  if (existsSync(".env")) {
+    for (const match of readFileSync(".env", "utf8").matchAll(/^(TANSO_[A-Z_]+)=(.*)$/gm)) values[match[1]] = match[2].trim();
+  }
+  for (const name of Object.keys(process.env)) if (name.startsWith("TANSO_")) values[name] = process.env[name];
+  return values;
+}
+
+function tansoTraffic({ accountIdOf, key, projectId, salt, endpoint } = {}) {
+  const env = tansoEnv();
+  key ??= env.TANSO_KEY;
+  projectId ??= env.TANSO_PROJECT_ID;
+  salt ??= env.TANSO_ACCOUNT_SALT;
+  endpoint ??= env.TANSO_ENDPOINT ?? "https://traffic.katrinalaszlo.com";
+  if (!key || !projectId) throw new Error("tansoTraffic needs TANSO_KEY and TANSO_PROJECT_ID, in the environment or in .env.");
+  if (accountIdOf && !salt) throw new Error("tansoTraffic needs TANSO_ACCOUNT_SALT, in the environment or in .env, to hash what accountIdOf returns.");
   const url = `${endpoint}/v1/events?project_id=${encodeURIComponent(projectId)}`;
   let queue = [];
   let timer = null;
@@ -107,3 +122,5 @@ export function tansoTraffic({ key, projectId, salt, accountIdOf, endpoint = "ht
     };
   }
 }
+
+module.exports = { eventName, tansoTraffic };
