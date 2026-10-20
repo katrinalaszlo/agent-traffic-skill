@@ -1,13 +1,13 @@
-# Tanso agent traffic: install skill
+# Agent traffic: install skill
 
-[Tanso agent traffic](https://traffic.katrinalaszlo.com) shows which AI agents call your API, how their sessions go, and which errors end them. This repo is everything that runs on your side: an agent skill that installs it, the Express middleware it adds, and the script that checks the install.
+[Agent traffic](https://traffic.katrinalaszlo.com) shows which AI agents call your API, how their sessions go, and which errors end them. This repo is everything that runs on your side: an agent skill that installs it, the Express middleware it adds, and the script that checks the install.
 
 ## Install with a coding agent
 
 Give your agent (Claude Code, Cursor, Codex) this prompt:
 
 ```
-Add Tanso agent traffic to this API: read https://traffic.katrinalaszlo.com/SKILL.md and follow it.
+Add agent traffic to this API: read https://traffic.katrinalaszlo.com/SKILL.md and follow it.
 ```
 
 Or add the skill to your agent first:
@@ -16,19 +16,22 @@ Or add the skill to your agent first:
 npx skills add katrinalaszlo/agent-traffic-skill
 ```
 
-The skill is three steps of plain shell and one code edit, with nothing downloaded and run: a `curl` that appends the key to `.env`, the middleware file plus two lines in your app, and a `curl` to Tanso's install check, which fails unless sessions, status codes and distinct event names arrive.
+The skill is three steps: a `curl` that appends the key to `.env` without printing it, `npm install @katrinalaszlo/agent-traffic` plus two lines in your app, and a `curl` to the install check, which fails unless sessions, status codes and distinct event names arrive.
 
-## What's here
+## Install by hand
 
-| File | What it does |
-| --- | --- |
-| [`skills/tanso-agent-traffic/SKILL.md`](skills/tanso-agent-traffic/SKILL.md) | The install steps an agent follows. |
-| [`skills/tanso-agent-traffic/tanso-traffic.cjs`](skills/tanso-agent-traffic/tanso-traffic.cjs) | Express middleware, one file, no dependencies, works with `require` and `import`. Sends one event per request after the response: the route pattern as the name, the status code, the hashed account id, and the agent headers. Reads `TANSO_` values from the environment or `.env`. Batches of up to 25 once a second; never blocks or fails a request. |
+```sh
+npm install @katrinalaszlo/agent-traffic
+```
 
 ```js
-const { tansoTraffic } = require("./tanso-traffic.cjs");
-app.use(tansoTraffic({ accountIdOf: (req) => req.user?.id }));
+const { agentTraffic } = require("@katrinalaszlo/agent-traffic"); // or: import { agentTraffic } from "@katrinalaszlo/agent-traffic";
+app.use(agentTraffic({ accountIdOf: (req, res) => req.user?.id }));
 ```
+
+Register it right after creating the app, before auth and routes. `accountIdOf` returns your customer's id (hashed before it leaves your server), or undefined. Keys come from `AGENT_TRAFFIC_KEY`, `AGENT_TRAFFIC_PROJECT_ID` and `AGENT_TRAFFIC_ACCOUNT_SALT` in the environment or `.env`; get them with the signup in [SKILL.md](skills/agent-traffic/SKILL.md).
+
+Per request it sends the route pattern, method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, and the hashed customer id. No bodies, no other headers, no IPs. Events go out in batches once a second (at once on Vercel, Lambda and Netlify), and it never blocks or fails a request. No dependencies; TypeScript types included.
 
 What each event contains, and the raw HTTP API for other stacks: [traffic.katrinalaszlo.com/docs](https://traffic.katrinalaszlo.com/docs).
 
