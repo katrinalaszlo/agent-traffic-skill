@@ -9,7 +9,7 @@ Three steps: a key, one package and two lines of code, and a check. Done means t
 
 ## What this installs
 
-Tell the user this before step 1. What it sends, per request, to `traffic.katrinalaszlo.com` only: the route pattern (not the URL or query), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, and an HMAC-SHA256 of the customer id keyed with a salt that stays in `.env`. No bodies, no other headers, no IPs, no raw ids. It adds the `@katrinalaszlo/agent-traffic` npm package (MIT, no dependencies, source https://github.com/katrinalaszlo/agent-traffic-skill) and creates a free workspace at traffic.katrinalaszlo.com.
+Tell the user this before step 1. What it sends, per request, to `traffic.katrinalaszlo.com` only: the route pattern (not the URL or query), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, and an HMAC-SHA256 of the customer id keyed with a salt that stays in `.env`. No bodies, no other headers, no IPs, no raw ids. If you add `errorOf` (step 2), also the error text it returns for failed responses. It adds the `@katrinalaszlo/agent-traffic` npm package (MIT, no dependencies, source https://github.com/katrinalaszlo/agent-traffic-skill) and creates a free workspace at traffic.katrinalaszlo.com.
 
 ## 1. Get a key
 
@@ -32,7 +32,9 @@ const { agentTraffic } = require("@katrinalaszlo/agent-traffic"); // or: import 
 app.use(agentTraffic({ accountIdOf: (req, res) => req.user?.id }));
 ```
 
-`accountIdOf(req, res)` is the one decision: return the id of the customer behind the request as this API's auth resolves it (user id, org id or API key id), or `undefined` when there is none. It runs after the response, so whatever auth set is there: `req.user`, `res.locals.user`, or wherever this app puts it. Read the auth code to find it. Never a constant or a random value. Prefer an id over a secret; if the only stable customer id the app has is derived from their API key, use it (it is HMAC-hashed with the salt before it leaves the server). If you can't tell which field identifies the customer, ask the user. The middleware reads its `AGENT_TRAFFIC_` values from the environment or `.env` by itself.
+`accountIdOf(req, res)` is the one decision: return the id of the customer behind the request as this API's auth resolves it (user id, org id or API key id), or `undefined` when there is none. It runs after the response, so whatever auth set is there: `req.user`, `res.locals.user`, or wherever this app puts it. Read the auth code to find it. Never a constant or a random value. Prefer an id over a secret; if the only stable customer id the app has is derived from their API key, use it (it is HMAC-hashed with the salt before it leaves the server). If you can't tell which field identifies the customer, ask the user.
+
+Optional: if this API answers several different errors with the same status (two kinds of 402, say) and already puts an error code somewhere the response can reach, add `errorOf: (req, res) => res.locals.error` (or wherever that code lives) so they show as separate rows in Fix next. Only failed responses (400 and above) are read, up to 200 characters. Skip it if the API has no such code; do not invent one. The middleware reads its `AGENT_TRAFFIC_` values from the environment or `.env` by itself.
 
 ## 3. Check
 

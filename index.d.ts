@@ -3,6 +3,8 @@
 export interface AgentTrafficOptions {
   /** Your customer's id for this request (called after the response), or undefined when there is none. Hashed before it is sent. */
   accountIdOf?: (req: any, res: any) => string | number | null | undefined;
+  /** Error text for a failed response (status 400 and above), or undefined. Sent as properties.error, up to 200 characters, so two errors with the same status show separately in Fix next. */
+  errorOf?: (req: any, res: any) => string | null | undefined;
   /** Defaults to AGENT_TRAFFIC_KEY from the environment or .env. */
   key?: string;
   /** Defaults to AGENT_TRAFFIC_PROJECT_ID from the environment or .env. */
