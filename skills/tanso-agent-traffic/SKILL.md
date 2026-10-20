@@ -32,7 +32,7 @@ const { tansoTraffic } = require("./tanso-traffic.cjs");
 app.use(tansoTraffic({ accountIdOf: (req) => req.user?.id }));
 ```
 
-`accountIdOf` is the one decision: return the id of the customer behind the request as this API's auth resolves it (user id, org id or API key id; it runs after the response, so values auth set are there), or `undefined` when there is none. Never a constant, a random value or the raw API key. If you can't tell which field identifies the customer, ask the user. The middleware reads its `TANSO_` values from the environment or `.env` by itself.
+`accountIdOf` is the one decision: return the id of the customer behind the request as this API's auth resolves it (user id, org id or API key id; it runs after the response, so values auth set are there), or `undefined` when there is none. Never a constant or a random value. Prefer an id over a secret; if the only stable customer id the app has is derived from their API key, use it (it is HMAC-hashed with the salt before it leaves the server). If you can't tell which field identifies the customer, ask the user. The middleware reads its `TANSO_` values from the environment or `.env` by itself.
 
 ## 3. Check
 
