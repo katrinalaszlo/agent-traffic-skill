@@ -318,3 +318,46 @@ describe("agent-traffic.cjs as a file in a project", () => {
     assert.match(err.stderr, /needs AGENT_TRAFFIC_KEY and AGENT_TRAFFIC_PROJECT_ID, in the environment or in \.env/);
   });
 });
+
+describe("recordOutcome", () => {
+  const sent = [];
+  const withFetch = async (fn) => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, init) => { sent.push({ url, batch: JSON.parse(init.body) }); return { status: 202, json: async () => ({ accepted: 1, rejected: [] }) }; };
+    try { return await fn(); } finally { globalThis.fetch = original; }
+  };
+
+  test("hangs off the middleware, hashes accountId with the middleware's salt, and sends one event with an outcome block at once", async () => {
+    sent.length = 0;
+    const traffic = agentTraffic({ key: "ark_test", projectId: "p-1", salt: "s", accountIdOf: (req) => req.user?.id });
+    assert.equal(typeof traffic, "function");
+    await withFetch(() => traffic.recordOutcome({ accountId: "acct_1", name: "paid", value: 1999, currency: "USD", idempotencyKey: "evt_1", occurredAt: "2026-10-18T05:00:00Z" }));
+    assert.equal(sent.length, 1);
+    const [event] = sent[0].batch;
+    assert.deepEqual(event, {
+      idempotency_key: "evt_1", name: "paid", occurred_at: "2026-10-18T05:00:00.000Z", source: "sdk",
+      account_id: createHmac("sha256", "s").update("acct_1").digest("hex"),
+      outcome: { name: "paid", value: 1999, currency: "USD" }, properties: {},
+    });
+    await withFetch(() => traffic.recordOutcome({ accountId: 42, name: "signup", idempotencyKey: "acct_42" }));
+    assert.deepEqual(sent[1].batch[0].outcome, { name: "signup" });
+    assert.equal("value" in sent[1].batch[0].outcome, false);
+  });
+
+  test("bad input throws synchronously with the field named, before anything is sent", () => {
+    const traffic = agentTraffic({ key: "ark_test", projectId: "p-1", salt: "s" });
+    const cases = [
+      [{ name: "paid", value: 1, currency: "USD", idempotencyKey: "k" }, /accountId is required/],
+      [{ accountId: "a", name: "purchase", idempotencyKey: "k" }, /name must be one of signup, key_created/],
+      [{ accountId: "a", name: "signup" }, /idempotencyKey is required/],
+      [{ accountId: "a", name: "paid", value: "19.99", currency: "USD", idempotencyKey: "k" }, /value must be a whole number of minor units \(1999 for \$19\.99\), 0 or more, got string "19\.99"/],
+      [{ accountId: "a", name: "paid", value: 19.99, currency: "USD", idempotencyKey: "k" }, /value must be a whole number/],
+      [{ accountId: "a", name: "paid", value: 1999, currency: "usd", idempotencyKey: "k" }, /currency must be an ISO 4217 code/],
+      [{ accountId: "a", name: "paid", idempotencyKey: "k" }, /paid outcome needs value/],
+      [{ accountId: "a", name: "custom", value: 5, idempotencyKey: "k" }, /currency must be an ISO 4217 code/],
+      [{ accountId: "a", name: "signup", idempotencyKey: "k", occurredAt: "yesterday" }, /occurredAt is not a date/],
+    ];
+    for (const [input, message] of cases) assert.throws(() => traffic.recordOutcome(input), message, JSON.stringify(input));
+    assert.throws(() => agentTraffic({ key: "ark_test", projectId: "p-1" }).recordOutcome({ accountId: "a", name: "signup", idempotencyKey: "k" }), /needs AGENT_TRAFFIC_ACCOUNT_SALT/);
+  });
+});

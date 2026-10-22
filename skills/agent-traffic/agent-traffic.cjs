@@ -2,7 +2,11 @@
 // response is sent. npm package @katrinalaszlo/agent-traffic; source https://github.com/katrinalaszlo/agent-traffic-skill. Node 18+.
 //
 //   const { agentTraffic } = require("@katrinalaszlo/agent-traffic");   // or: import { agentTraffic } from "@katrinalaszlo/agent-traffic";
-//   app.use(agentTraffic({ accountIdOf: (req, res) => req.user?.id }));
+//   const traffic = agentTraffic({ accountIdOf: (req, res) => req.user?.id });
+//   app.use(traffic);
+//   // From your signup handler and your payment webhook: the outcome an agent's session led to.
+//   await traffic.recordOutcome({ accountId: user.id, name: "signup", idempotencyKey: user.id });
+//   await traffic.recordOutcome({ accountId: customer.id, name: "paid", value: 1999, currency: "USD", idempotencyKey: paymentEvent.id });
 //
 // accountIdOf returns your customer's id for the request (called with req and res after the response, so values your
 // auth set on either, such as req.user or res.locals.user, are there), or undefined. errorOf, optional, returns the
@@ -19,6 +23,7 @@ const { existsSync, readFileSync } = require("node:fs");
 const { dirname, join } = require("node:path");
 
 const BATCH_MAX = 25;
+const OUTCOME_NAMES = ["signup", "key_created", "activation", "paid", "custom"];
 const FLUSH_MS = 1000;
 const RETRIES_MAX = 3;
 const ERROR_MAX = 200;
@@ -151,7 +156,39 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
     while (queue.length > 0) send(queue.splice(0, BATCH_MAX), 1);
   }
 
-  return function agentTrafficMiddleware(req, res, next) {
+  const hashAccountId = (accountId) => createHmac("sha256", salt).update(String(accountId)).digest("hex");
+
+  // An outcome is sent at once, not batched: there are few of them and each one is money or a signup. Returns a
+  // promise that settles when the send has finished (sent, or logged and dropped); nothing it does can throw into
+  // your handler after validation. Bad input throws synchronously, at your call site, with the field named: that is
+  // your bug to see now, not a rejection to find in a log later.
+  function recordOutcome({ accountId, name, value, currency, idempotencyKey, occurredAt } = {}) {
+    if (!salt) throw new TypeError("recordOutcome needs AGENT_TRAFFIC_ACCOUNT_SALT (or the salt option) to hash accountId, the same salt the middleware uses. docs: https://traffic.katrinalaszlo.com/docs#outcomes");
+    if (accountId === undefined || accountId === null || String(accountId) === "") throw new TypeError("recordOutcome: accountId is required: the same customer id accountIdOf returns, so the outcome joins the agent's session. docs: https://traffic.katrinalaszlo.com/docs#outcomes");
+    if (!OUTCOME_NAMES.includes(name)) throw new TypeError(`recordOutcome: name must be one of ${OUTCOME_NAMES.join(", ")}, got ${JSON.stringify(name)}. docs: https://traffic.katrinalaszlo.com/docs#outcomes`);
+    if (typeof idempotencyKey !== "string" || idempotencyKey === "" || idempotencyKey.length > 200) throw new TypeError("recordOutcome: idempotencyKey is required (1 to 200 characters): your payment event id or signup id, so a retried webhook never counts twice. docs: https://traffic.katrinalaszlo.com/docs#outcomes");
+    const hasValue = value !== undefined && value !== null;
+    if (hasValue && (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)) throw new TypeError(`recordOutcome: value must be a whole number of minor units (1999 for $19.99), 0 or more, got ${typeof value === "string" ? `string ${JSON.stringify(value)}` : String(value)}. docs: https://traffic.katrinalaszlo.com/docs#outcomes`);
+    if (hasValue && !/^[A-Z]{3}$/.test(String(currency))) throw new TypeError(`recordOutcome: currency must be an ISO 4217 code such as USD when value is set, got ${JSON.stringify(currency)}. docs: https://traffic.katrinalaszlo.com/docs#outcomes`);
+    if (name === "paid" && !hasValue) throw new TypeError("recordOutcome: a paid outcome needs value (minor units) and currency. docs: https://traffic.katrinalaszlo.com/docs#outcomes");
+    const at = occurredAt === undefined ? new Date() : new Date(occurredAt);
+    if (Number.isNaN(at.getTime())) throw new TypeError(`recordOutcome: occurredAt is not a date: ${JSON.stringify(occurredAt)}`);
+    const event = {
+      idempotency_key: idempotencyKey,
+      name,
+      occurred_at: at.toISOString(),
+      source: "sdk",
+      account_id: hashAccountId(accountId),
+      outcome: { name, ...(hasValue ? { value, currency } : {}) },
+      properties: {},
+    };
+    const vercel = globalThis[VERCEL_CONTEXT]?.get?.();
+    const sending = send([event], 1);
+    vercel?.waitUntil?.(sending);
+    return sending;
+  }
+
+  function agentTrafficMiddleware(req, res, next) {
     const occurredAt = new Date().toISOString();
     // Read while the request is current: the context is per request.
     const vercel = globalThis[VERCEL_CONTEXT]?.get?.();
@@ -175,7 +212,9 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
       else if (!timer) timer = setTimeout(flush, FLUSH_MS).unref();
     });
     next();
-  };
+  }
+  agentTrafficMiddleware.recordOutcome = recordOutcome;
+  return agentTrafficMiddleware;
 
   function eventOf(req, res, occurredAt) {
     const accountId = accountIdOf ? accountIdOf(req, res) : undefined;
@@ -187,7 +226,7 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
       name: eventName(req),
       occurred_at: occurredAt,
       source: "sdk",
-      account_id: accountId ? createHmac("sha256", salt).update(String(accountId)).digest("hex") : undefined,
+      account_id: accountId ? hashAccountId(accountId) : undefined,
       user_agent: req.headers["user-agent"],
       accept_language: req.headers["accept-language"],
       signature_agent: req.headers["signature-agent"],

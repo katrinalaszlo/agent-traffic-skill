@@ -38,6 +38,8 @@ app.use(agentTraffic({ accountIdOf: (req, res) => req.user?.id }));
 
 Optional: if this API answers several different errors with the same status (two kinds of 402, say) with an error code in the body, set `res.locals.error = "<that code>"` next to each place it sends an error, and add `errorOf: (req, res) => res.locals.error`, so they show as separate rows in Fix next. Only failed responses (400 and above) are read, up to 200 characters. Use the codes the API already returns; do not invent new ones. The middleware reads its `AGENT_TRAFFIC_` values from the environment or `.env` by itself.
 
+Optional, offer it once and do it only if the user says yes: keep the middleware in a variable (`const traffic = agentTraffic({...}); app.use(traffic);`) and, in the signup handler and the payment webhook handler, call `await traffic.recordOutcome({ accountId: <the same id accountIdOf returns>, name: "signup", idempotencyKey: <the new account's id> })` and `await traffic.recordOutcome({ accountId, name: "paid", value: <whole minor units, 1999 for $19.99>, currency: "USD", idempotencyKey: <the payment event id> })`. The dashboard then shows which class of agent led to signups and revenue.
+
 ## 3. Check
 
 Start the server, then send at least 5 requests to at least 3 routes as an authenticated customer, including one that fails (4xx), some with agent headers:
