@@ -66,6 +66,42 @@ function agentTrafficEnv() {
   return values;
 }
 
+// Web Bot Auth: when an agent signed its request (Signature and Signature-Input headers), the event carries what ingest
+// needs to check the signature: those two headers, the method and absolute URL, and only the other headers the
+// signature covers. Never a credential header, whatever the signer covered. An unsigned request adds nothing.
+const SIGNATURE_HEADERS = ["signature", "signature-input", "signature-agent"];
+const FORBIDDEN_COVERED = ["authorization", "proxy-authorization", "cookie", "set-cookie"];
+
+// The header names a Signature-Input covers: the quoted strings inside its parentheses that are not @-derived components.
+function coveredHeaderNames(signatureInput) {
+  const names = [];
+  for (const group of signatureInput.matchAll(/\(([^)]*)\)/g)) {
+    for (const item of group[1].matchAll(/"([^"]+)"/g)) if (!item[1].startsWith("@")) names.push(item[1].toLowerCase());
+  }
+  return names;
+}
+
+function signatureMaterial(req) {
+  const signature = req.headers.signature;
+  const signatureInput = req.headers["signature-input"];
+  if (typeof signature !== "string" || typeof signatureInput !== "string") return {};
+  const covered = {};
+  for (const name of coveredHeaderNames(signatureInput)) {
+    if (SIGNATURE_HEADERS.includes(name) || FORBIDDEN_COVERED.includes(name) || req.headers[name] === undefined) continue;
+    covered[name] = Array.isArray(req.headers[name]) ? req.headers[name].join(", ") : String(req.headers[name]);
+  }
+  // req.protocol honours Express's trust proxy setting, so behind a proxy the URL is the one the agent signed.
+  const host = req.headers.host;
+  const url = typeof host === "string" && host !== "" ? `${req.protocol ?? "https"}://${host}${req.originalUrl ?? req.url ?? "/"}` : undefined;
+  return {
+    signature,
+    signature_input: signatureInput,
+    method: String(req.method ?? "GET").toUpperCase(),
+    ...(url ? { url } : {}),
+    ...(Object.keys(covered).length > 0 ? { covered_headers: covered } : {}),
+  };
+}
+
 function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } = {}) {
   const env = agentTrafficEnv();
   key ??= env.AGENT_TRAFFIC_KEY;
@@ -155,9 +191,10 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
       user_agent: req.headers["user-agent"],
       accept_language: req.headers["accept-language"],
       signature_agent: req.headers["signature-agent"],
+      ...signatureMaterial(req),
       properties: { status_code: res.statusCode, method: req.method, ...(typeof error === "string" && error !== "" ? { error: error.slice(0, ERROR_MAX) } : {}) },
     };
   }
 }
 
-module.exports = { eventName, agentTraffic };
+module.exports = { eventName, agentTraffic, signatureMaterial };

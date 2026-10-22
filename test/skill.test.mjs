@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
-import { eventName, agentTraffic } from "../skills/agent-traffic/agent-traffic.cjs";
+import { eventName, agentTraffic, signatureMaterial } from "../skills/agent-traffic/agent-traffic.cjs";
 
 const run = promisify(execFile);
 
@@ -41,6 +41,62 @@ describe("eventName", () => {
       req.params = { orderId: "42" };
       assert.equal(eventName(req), "orders_orderid");
       assert.equal(eventName(fakeRequest({ method: "POST", baseUrl, route: "/" })), "post");
+    }
+  });
+});
+
+describe("signatureMaterial (Web Bot Auth forwarding)", () => {
+  const INPUT = 'sig1=("@method" "@authority" "content-digest" "signature-agent";key="sig1" "authorization");created=1;expires=2;keyid="k";tag="web-bot-auth"';
+  const signed = (extra = {}) => ({
+    method: "post", protocol: "https", originalUrl: "/v1/charge?x=1", url: "/v1/charge?x=1",
+    headers: { host: "shop.example", signature: "sig1=:AAAA:", "signature-input": INPUT, "signature-agent": 'sig1="https://claude.ai"', "content-digest": "sha-256=:abc:", authorization: "Bearer secret", cookie: "s=1", "user-agent": "x", ...extra },
+  });
+
+  test("an unsigned request adds nothing", () => {
+    assert.deepEqual(signatureMaterial({ method: "GET", headers: { "user-agent": "x", "signature-agent": '"https://claude.ai"' } }), {});
+    assert.deepEqual(signatureMaterial({ method: "GET", headers: { signature: "sig1=:AAAA:" } }), {});
+  });
+
+  test("a signed request forwards the two headers, uppercase method, absolute URL, and only the covered non-credential headers", () => {
+    const out = signatureMaterial(signed());
+    assert.deepEqual(out, {
+      signature: "sig1=:AAAA:",
+      signature_input: INPUT,
+      method: "POST",
+      url: "https://shop.example/v1/charge?x=1",
+      covered_headers: { "content-digest": "sha-256=:abc:" },
+    });
+    assert.equal(JSON.stringify(out).includes("secret"), false);
+    assert.equal(JSON.stringify(out).includes("s=1"), false);
+  });
+
+  test("a covered header the request lacks is skipped; repeated header values join; no host means no url", () => {
+    const out = signatureMaterial(signed({ "content-digest": ["a", "b"] }));
+    assert.deepEqual(out.covered_headers, { "content-digest": "a, b" });
+    const noHost = signed(); delete noHost.headers.host;
+    assert.equal("url" in signatureMaterial(noHost), false);
+    const missing = signed(); delete missing.headers["content-digest"];
+    assert.equal("covered_headers" in signatureMaterial(missing), false);
+  });
+
+  test("the middleware puts the material on the event beside signature_agent", async () => {
+    const seen = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, init) => { seen.push(JSON.parse(init.body)); return { status: 202, json: async () => ({ accepted: 1, rejected: [] }) }; };
+    try {
+      const middleware = agentTraffic({ key: "ark_test", projectId: "p-1" });
+      const req = { ...signed(), baseUrl: "", route: { path: "/v1/charge" } };
+      const res = new EventEmitter();
+      middleware(req, res, () => {});
+      res.statusCode = 200;
+      res.emit("finish");
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      assert.equal(seen[0][0].signature_input, INPUT);
+      assert.equal(seen[0][0].url, "https://shop.example/v1/charge?x=1");
+      assert.equal(seen[0][0].signature_agent, 'sig1="https://claude.ai"');
+      assert.equal("authorization" in (seen[0][0].covered_headers ?? {}), false);
+    } finally {
+      globalThis.fetch = original;
     }
   });
 });
