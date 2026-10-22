@@ -319,6 +319,48 @@ describe("agent-traffic.cjs as a file in a project", () => {
   });
 });
 
+describe("rejection logging", () => {
+  test("rejections are coalesced per reason per batch; unknown_field names the field and the fix", async () => {
+    const errors = [];
+    const originalError = console.error;
+    const originalFetch = globalThis.fetch;
+    console.error = (line) => errors.push(line);
+    globalThis.fetch = async () => ({ status: 202, json: async () => ({ accepted: 0, rejected: [
+      { idempotency_key: "a", reason: "unknown_field", field: "outcome" }, { idempotency_key: "b", reason: "unknown_field", field: "outcome" },
+      { idempotency_key: "c", reason: "duplicate" }, { idempotency_key: "d", reason: "invalid_name" },
+    ] }) });
+    try {
+      const traffic = agentTraffic({ key: "ark_test", projectId: "p-1", salt: "s" });
+      await traffic.recordOutcome({ accountId: "a", name: "signup", idempotencyKey: "k1" });
+      assert.equal(errors.length, 2);
+      assert.match(errors[0], /^agent-traffic: 2 of 1 events rejected: unknown_field \(outcome\)\. The agent traffic host does not know this field yet/);
+      assert.match(errors[1], /^agent-traffic: 1 of 1 events rejected: invalid_name$/);
+    } finally {
+      console.error = originalError;
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("rotation warnings", () => {
+  test("a 202 with warnings is logged once per process, not once per batch", async () => {
+    const errors = [];
+    const originalError = console.error;
+    const originalFetch = globalThis.fetch;
+    console.error = (line) => errors.push(line);
+    globalThis.fetch = async () => ({ status: 202, json: async () => ({ accepted: 1, rejected: [], warnings: ["This key was rotated on X and stops working on Y. Set AGENT_TRAFFIC_KEY to the key that rotation returned and restart your server."] }) });
+    try {
+      const traffic = agentTraffic({ key: "ark_test", projectId: "p-1", salt: "s" });
+      await traffic.recordOutcome({ accountId: "a", name: "signup", idempotencyKey: "k1" });
+      await traffic.recordOutcome({ accountId: "a", name: "signup", idempotencyKey: "k2" });
+      assert.equal(errors.filter((line) => /was rotated on X/.test(line)).length, 1);
+    } finally {
+      console.error = originalError;
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 describe("recordOutcome", () => {
   const sent = [];
   const withFetch = async (fn) => {

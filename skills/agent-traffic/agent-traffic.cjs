@@ -118,6 +118,7 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
   const url = `${endpoint}/v1/events?project_id=${encodeURIComponent(projectId)}`;
   let queue = [];
   let timer = null;
+  const warned = new Set();
 
   async function send(batch, attempt) {
     let failure = null;
@@ -129,8 +130,24 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
       });
       const body = await res.json();
       if (res.status === 202) {
+        // A key inside its rotation grace window: said once per process, not once per batch.
+        for (const warning of body.warnings ?? []) {
+          if (!warned.has(warning)) {
+            warned.add(warning);
+            console.error(`agent-traffic: ${warning}`);
+          }
+        }
+        // One line per reason per batch, not one per event. An unknown field means this host is older than this
+        // package: say which field and what to do, instead of a uuid per event.
+        const byReason = new Map();
         for (const entry of body.rejected) {
-          if (entry.reason !== "duplicate") console.error(`agent-traffic: rejected ${entry.idempotency_key}: ${entry.reason}`);
+          if (entry.reason === "duplicate") continue;
+          const label = entry.reason === "unknown_field" ? `unknown_field (${entry.field ?? "?"})` : entry.reason;
+          byReason.set(label, (byReason.get(label) ?? 0) + 1);
+        }
+        for (const [label, n] of byReason) {
+          const hint = label.startsWith("unknown_field") ? ". The agent traffic host does not know this field yet: it is older than this package (0.3.0). Upgrade the host, or pin @katrinalaszlo/agent-traffic to 0.2.x. https://traffic.katrinalaszlo.com/docs#event-fields" : "";
+          console.error(`agent-traffic: ${n} of ${batch.length} events rejected: ${label}${hint}`);
         }
         return;
       }
