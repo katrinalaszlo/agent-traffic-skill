@@ -9,7 +9,7 @@ Three steps: a key, one package and two lines of code, and a check. Done means t
 
 ## What this installs
 
-Tell the user this before step 1. What it sends, per request, to `alg.katrinalaszlo.com` only: the route pattern (not the URL or query), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, and an HMAC-SHA256 of the customer id keyed with a salt that stays in `.env`. For a request an agent signed (Web Bot Auth, `Signature` and `Signature-Input` headers), also those two headers, the full URL and the other headers the signature covers, so the signature can be checked; never `Authorization` or `Cookie`. Otherwise no bodies, no other headers, no IPs, no raw ids. If you add `errorOf` (step 2), also the error text it returns for failed responses. It adds the `@katrinalaszlo/agent-traffic` npm package (MIT, no dependencies, source https://github.com/katrinalaszlo/agent-traffic-skill) and creates a free workspace at alg.katrinalaszlo.com.
+Tell the user this before step 1. What it sends, per request, to `alg.katrinalaszlo.com` only: the route pattern (not the URL or query), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, and an HMAC-SHA256 of the customer id keyed with a salt that stays in `.env`. For a request an agent signed (Web Bot Auth, `Signature` and `Signature-Input` headers), also those two headers, the full URL and the other headers the signature covers, so the signature can be checked; never `Authorization` or `Cookie`. Otherwise no bodies, no other headers, no IPs, no raw ids. If you add `errorOf` (step 2), also the error text it returns for failed responses. It adds the `@katrinalaszlo/track` npm package (MIT, no dependencies, source https://github.com/katrinalaszlo/agent-traffic-skill) and creates a free workspace at alg.katrinalaszlo.com.
 
 Event names exclude router mount prefixes because they can contain raw IDs. A route `/orders/:orderId` mounted at `/customers/:customerId` records `orders_orderid`; identical route patterns under different mounts share a name.
 
@@ -25,12 +25,12 @@ grep -qx ".env" .gitignore 2>/dev/null || echo ".env" >> .gitignore
 
 ## 2. Add the middleware
 
-Install the `@katrinalaszlo/agent-traffic` package in the API's package, with the project's package manager (`npm install @katrinalaszlo/agent-traffic`, `pnpm add @katrinalaszlo/agent-traffic`, `yarn add @katrinalaszlo/agent-traffic`; in a monorepo, in the API's workspace). It ships TypeScript types.
+Install the `@katrinalaszlo/track` package in the API's package, with the project's package manager (`npm install @katrinalaszlo/track`, `pnpm add @katrinalaszlo/track`, `yarn add @katrinalaszlo/track`; in a monorepo, in the API's workspace). It ships TypeScript types.
 
 Add two lines right after `const app = express()`, before auth and routes:
 
 ```js
-const { agentTraffic } = require("@katrinalaszlo/agent-traffic"); // or: import { agentTraffic } from "@katrinalaszlo/agent-traffic";
+const { agentTraffic } = require("@katrinalaszlo/track"); // or: import { agentTraffic } from "@katrinalaszlo/track";
 app.use(agentTraffic({ accountIdOf: (req, res) => req.user?.id }));
 ```
 

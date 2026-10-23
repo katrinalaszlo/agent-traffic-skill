@@ -1,7 +1,7 @@
 // Agent traffic: Express middleware that sends one event per request to alg.katrinalaszlo.com, after the
-// response is sent. npm package @katrinalaszlo/agent-traffic; source https://github.com/katrinalaszlo/track-skill. Node 18+.
+// response is sent. npm package @katrinalaszlo/track; source https://github.com/katrinalaszlo/track-skill. Node 18+.
 //
-//   const { agentTraffic } = require("@katrinalaszlo/agent-traffic");   // or: import { agentTraffic } from "@katrinalaszlo/agent-traffic";
+//   const { agentTraffic } = require("@katrinalaszlo/track");   // or: import { agentTraffic } from "@katrinalaszlo/track";
 //   const traffic = agentTraffic({ accountIdOf: (req, res) => req.user?.id });
 //   app.use(traffic);
 //   // From your signup handler and your payment webhook: the outcome an agent's session led to.
@@ -146,7 +146,7 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
           byReason.set(label, (byReason.get(label) ?? 0) + 1);
         }
         for (const [label, n] of byReason) {
-          const hint = label.startsWith("unknown_field") ? ". The agent traffic host does not know this field yet: it is older than this package (0.3.0). Upgrade the host, or pin @katrinalaszlo/agent-traffic to 0.2.x. https://alg.katrinalaszlo.com/docs#event-fields" : "";
+          const hint = label.startsWith("unknown_field") ? ". The agent traffic host does not know this field yet: it is older than this package (0.3.0). Upgrade the host, or pin @katrinalaszlo/track to 0.2.x. https://alg.katrinalaszlo.com/docs#event-fields" : "";
           console.error(`agent-traffic: ${n} of ${batch.length} events rejected: ${label}${hint}`);
         }
         return;

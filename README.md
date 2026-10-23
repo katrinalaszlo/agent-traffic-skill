@@ -16,16 +16,16 @@ Or add the skill to your agent first:
 npx skills add katrinalaszlo/track-skill
 ```
 
-The skill is three steps: a `curl` that appends the key to `.env` without printing it, `npm install @katrinalaszlo/agent-traffic` plus two lines in your app, and a `curl` to the install check, which fails unless sessions, status codes and distinct event names arrive.
+The skill is three steps: a `curl` that appends the key to `.env` without printing it, `npm install @katrinalaszlo/track` plus two lines in your app, and a `curl` to the install check, which fails unless sessions, status codes and distinct event names arrive.
 
 ## Install by hand
 
 ```sh
-npm install @katrinalaszlo/agent-traffic
+npm install @katrinalaszlo/track
 ```
 
 ```js
-const { agentTraffic } = require("@katrinalaszlo/agent-traffic"); // or: import { agentTraffic } from "@katrinalaszlo/agent-traffic";
+const { agentTraffic } = require("@katrinalaszlo/track"); // or: import { agentTraffic } from "@katrinalaszlo/track";
 app.use(agentTraffic({ accountIdOf: (req, res) => req.user?.id }));
 ```
 
