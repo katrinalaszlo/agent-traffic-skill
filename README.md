@@ -13,7 +13,7 @@ Add agent traffic to this API: read https://alg.katrinalaszlo.com/SKILL.md and f
 Or add the skill to your agent first:
 
 ```sh
-npx skills add katrinalaszlo/agent-traffic-skill
+npx skills add katrinalaszlo/track-skill
 ```
 
 The skill is three steps: a `curl` that appends the key to `.env` without printing it, `npm install @katrinalaszlo/agent-traffic` plus two lines in your app, and a `curl` to the install check, which fails unless sessions, status codes and distinct event names arrive.

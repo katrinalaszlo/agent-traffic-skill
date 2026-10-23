@@ -6,7 +6,7 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/katrinalaszlo/agent-traffic-skill.git"
+    "url": "git+https://github.com/katrinalaszlo/track-skill.git"
   },
   "homepage": "https://traffic.katrinalaszlo.com/docs",
   "keywords": [
