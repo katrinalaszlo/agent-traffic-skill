@@ -142,7 +142,7 @@ describe("agentTraffic middleware", () => {
     mock.timers.tick(1000);
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(sent.length, 1);
-    assert.equal(sent[0].url, "https://traffic.katrinalaszlo.com/v1/events?project_id=p-1");
+    assert.equal(sent[0].url, "https://alg.katrinalaszlo.com/v1/events?project_id=p-1");
     assert.equal(sent[0].init.headers.authorization, "Bearer ark_test");
     const [charge, docs] = sent[0].batch;
     assert.equal(charge.name, "charge_post");

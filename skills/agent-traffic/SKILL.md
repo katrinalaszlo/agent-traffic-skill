@@ -5,11 +5,11 @@ description: Install agent traffic into a Node/Express API, so the API owner can
 
 # Install agent traffic
 
-Three steps: a key, one package and two lines of code, and a check. Done means the check in step 3 says `RESULT: PASS`. Never print the key or salt: the commands below write them to `.env` without showing them. Covers Node 18+ with Express; for another stack, stop and point the user to https://traffic.katrinalaszlo.com/docs.md.
+Three steps: a key, one package and two lines of code, and a check. Done means the check in step 3 says `RESULT: PASS`. Never print the key or salt: the commands below write them to `.env` without showing them. Covers Node 18+ with Express; for another stack, stop and point the user to https://alg.katrinalaszlo.com/docs.md.
 
 ## What this installs
 
-Tell the user this before step 1. What it sends, per request, to `traffic.katrinalaszlo.com` only: the route pattern (not the URL or query), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, and an HMAC-SHA256 of the customer id keyed with a salt that stays in `.env`. For a request an agent signed (Web Bot Auth, `Signature` and `Signature-Input` headers), also those two headers, the full URL and the other headers the signature covers, so the signature can be checked; never `Authorization` or `Cookie`. Otherwise no bodies, no other headers, no IPs, no raw ids. If you add `errorOf` (step 2), also the error text it returns for failed responses. It adds the `@katrinalaszlo/agent-traffic` npm package (MIT, no dependencies, source https://github.com/katrinalaszlo/agent-traffic-skill) and creates a free workspace at traffic.katrinalaszlo.com.
+Tell the user this before step 1. What it sends, per request, to `alg.katrinalaszlo.com` only: the route pattern (not the URL or query), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, and an HMAC-SHA256 of the customer id keyed with a salt that stays in `.env`. For a request an agent signed (Web Bot Auth, `Signature` and `Signature-Input` headers), also those two headers, the full URL and the other headers the signature covers, so the signature can be checked; never `Authorization` or `Cookie`. Otherwise no bodies, no other headers, no IPs, no raw ids. If you add `errorOf` (step 2), also the error text it returns for failed responses. It adds the `@katrinalaszlo/agent-traffic` npm package (MIT, no dependencies, source https://github.com/katrinalaszlo/agent-traffic-skill) and creates a free workspace at alg.katrinalaszlo.com.
 
 Event names exclude router mount prefixes because they can contain raw IDs. A route `/orders/:orderId` mounted at `/customers/:customerId` records `orders_orderid`; identical route patterns under different mounts share a name.
 
@@ -18,7 +18,7 @@ Event names exclude router mount prefixes because they can contain raw IDs. A ro
 From the repository root (in a monorepo, the workspace root is fine: the middleware finds `.env` in the directory the server starts from, its own folder, or any folder above). Skip the first command if `.env` already has `AGENT_TRAFFIC_KEY`.
 
 ```sh
-curl -fsS -X POST "https://traffic.katrinalaszlo.com/v1/signup?format=env" -H "Content-Type: application/json" -d '{"label":"<project name>","scopes":["read","write"]}' >> .env
+curl -fsS -X POST "https://alg.katrinalaszlo.com/v1/signup?format=env" -H "Content-Type: application/json" -d '{"label":"<project name>","scopes":["read","write"]}' >> .env
 grep -q "^AGENT_TRAFFIC_ACCOUNT_SALT=" .env || echo "AGENT_TRAFFIC_ACCOUNT_SALT=$(openssl rand -hex 32)" >> .env
 grep -qx ".env" .gitignore 2>/dev/null || echo ".env" >> .gitignore
 ```
@@ -51,11 +51,11 @@ curl -H "User-Agent: Claude-User (claude-code/2.1)" -H 'Signature-Agent: "https:
 Wait 2 seconds, then:
 
 ```sh
-curl -fsS -X POST https://traffic.katrinalaszlo.com/v1/install-check -H "Authorization: Bearer $(sed -n 's/^AGENT_TRAFFIC_KEY=//p' .env)"
+curl -fsS -X POST https://alg.katrinalaszlo.com/v1/install-check -H "Authorization: Bearer $(sed -n 's/^AGENT_TRAFFIC_KEY=//p' .env)"
 ```
 
 On a `FAIL` line, fix what it says and repeat step 3. `WARN` lines are for the user.
 
 ## Hand off
 
-Tell the user: the dashboard is at https://traffic.katrinalaszlo.com/login (sign in with `AGENT_TRAFFIC_KEY` from `.env`); which field `accountIdOf` returns; that production needs the three `AGENT_TRAFFIC_` values from `.env`, with the same salt everywhere; and that on serverless hosts (Vercel functions, Lambda) events can be lost when the process freezes after the response.
+Tell the user: the dashboard is at https://alg.katrinalaszlo.com/login (sign in with `AGENT_TRAFFIC_KEY` from `.env`); which field `accountIdOf` returns; that production needs the three `AGENT_TRAFFIC_` values from `.env`, with the same salt everywhere; and that on serverless hosts (Vercel functions, Lambda) events can be lost when the process freezes after the response.

@@ -1,13 +1,13 @@
 # Agent traffic: install skill
 
-[Agent traffic](https://traffic.katrinalaszlo.com) shows which AI agents call your API, how their sessions go, and which errors end them. This repo is everything that runs on your side: an agent skill that installs it, the Express middleware it adds, and the script that checks the install.
+[Agent traffic](https://alg.katrinalaszlo.com) shows which AI agents call your API, how their sessions go, and which errors end them. This repo is everything that runs on your side: an agent skill that installs it, the Express middleware it adds, and the script that checks the install.
 
 ## Install with a coding agent
 
 Give your agent (Claude Code, Cursor, Codex) this prompt:
 
 ```
-Add agent traffic to this API: read https://traffic.katrinalaszlo.com/SKILL.md and follow it.
+Add agent traffic to this API: read https://alg.katrinalaszlo.com/SKILL.md and follow it.
 ```
 
 Or add the skill to your agent first:
@@ -35,7 +35,7 @@ Per request it sends the route pattern, method, status code, the `User-Agent`, `
 
 Event names use the matched route's pattern and exclude router mount prefixes, which can contain raw IDs. A router mounted at `/customers/:customerId` with route `/orders/:orderId` records `orders_orderid` for every customer. Routes with the same pattern under different mounts share an event name.
 
-What each event contains, and the raw HTTP API for other stacks: [traffic.katrinalaszlo.com/docs](https://traffic.katrinalaszlo.com/docs).
+What each event contains, and the raw HTTP API for other stacks: [alg.katrinalaszlo.com/docs](https://alg.katrinalaszlo.com/docs).
 
 ## Tests
 

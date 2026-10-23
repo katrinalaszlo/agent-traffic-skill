@@ -11,7 +11,7 @@ export interface AgentTrafficOptions {
   projectId?: string;
   /** Defaults to AGENT_TRAFFIC_ACCOUNT_SALT from the environment or .env. Required when accountIdOf is set. */
   salt?: string;
-  /** Defaults to AGENT_TRAFFIC_ENDPOINT, else https://traffic.katrinalaszlo.com. */
+  /** Defaults to AGENT_TRAFFIC_ENDPOINT, else https://alg.katrinalaszlo.com. */
   endpoint?: string;
 }
 

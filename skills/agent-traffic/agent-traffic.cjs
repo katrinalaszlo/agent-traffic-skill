@@ -1,4 +1,4 @@
-// Agent traffic: Express middleware that sends one event per request to traffic.katrinalaszlo.com, after the
+// Agent traffic: Express middleware that sends one event per request to alg.katrinalaszlo.com, after the
 // response is sent. npm package @katrinalaszlo/agent-traffic; source https://github.com/katrinalaszlo/agent-traffic-skill. Node 18+.
 //
 //   const { agentTraffic } = require("@katrinalaszlo/agent-traffic");   // or: import { agentTraffic } from "@katrinalaszlo/agent-traffic";
@@ -112,7 +112,7 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
   key ??= env.AGENT_TRAFFIC_KEY;
   projectId ??= env.AGENT_TRAFFIC_PROJECT_ID;
   salt ??= env.AGENT_TRAFFIC_ACCOUNT_SALT;
-  endpoint ??= env.AGENT_TRAFFIC_ENDPOINT ?? "https://traffic.katrinalaszlo.com";
+  endpoint ??= env.AGENT_TRAFFIC_ENDPOINT ?? "https://alg.katrinalaszlo.com";
   if (!key || !projectId) throw new Error("agentTraffic needs AGENT_TRAFFIC_KEY and AGENT_TRAFFIC_PROJECT_ID, in the environment or in .env.");
   if (accountIdOf && !salt) throw new Error("agentTraffic needs AGENT_TRAFFIC_ACCOUNT_SALT, in the environment or in .env, to hash what accountIdOf returns.");
   const url = `${endpoint}/v1/events?project_id=${encodeURIComponent(projectId)}`;
@@ -146,7 +146,7 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
           byReason.set(label, (byReason.get(label) ?? 0) + 1);
         }
         for (const [label, n] of byReason) {
-          const hint = label.startsWith("unknown_field") ? ". The agent traffic host does not know this field yet: it is older than this package (0.3.0). Upgrade the host, or pin @katrinalaszlo/agent-traffic to 0.2.x. https://traffic.katrinalaszlo.com/docs#event-fields" : "";
+          const hint = label.startsWith("unknown_field") ? ". The agent traffic host does not know this field yet: it is older than this package (0.3.0). Upgrade the host, or pin @katrinalaszlo/agent-traffic to 0.2.x. https://alg.katrinalaszlo.com/docs#event-fields" : "";
           console.error(`agent-traffic: ${n} of ${batch.length} events rejected: ${label}${hint}`);
         }
         return;
@@ -180,14 +180,14 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
   // your handler after validation. Bad input throws synchronously, at your call site, with the field named: that is
   // your bug to see now, not a rejection to find in a log later.
   function recordOutcome({ accountId, name, value, currency, idempotencyKey, occurredAt } = {}) {
-    if (!salt) throw new TypeError("recordOutcome needs AGENT_TRAFFIC_ACCOUNT_SALT (or the salt option) to hash accountId, the same salt the middleware uses. docs: https://traffic.katrinalaszlo.com/docs#outcomes");
-    if (accountId === undefined || accountId === null || String(accountId) === "") throw new TypeError("recordOutcome: accountId is required: the same customer id accountIdOf returns, so the outcome joins the agent's session. docs: https://traffic.katrinalaszlo.com/docs#outcomes");
-    if (!OUTCOME_NAMES.includes(name)) throw new TypeError(`recordOutcome: name must be one of ${OUTCOME_NAMES.join(", ")}, got ${JSON.stringify(name)}. docs: https://traffic.katrinalaszlo.com/docs#outcomes`);
-    if (typeof idempotencyKey !== "string" || idempotencyKey === "" || idempotencyKey.length > 200) throw new TypeError("recordOutcome: idempotencyKey is required (1 to 200 characters): your payment event id or signup id, so a retried webhook never counts twice. docs: https://traffic.katrinalaszlo.com/docs#outcomes");
+    if (!salt) throw new TypeError("recordOutcome needs AGENT_TRAFFIC_ACCOUNT_SALT (or the salt option) to hash accountId, the same salt the middleware uses. docs: https://alg.katrinalaszlo.com/docs#outcomes");
+    if (accountId === undefined || accountId === null || String(accountId) === "") throw new TypeError("recordOutcome: accountId is required: the same customer id accountIdOf returns, so the outcome joins the agent's session. docs: https://alg.katrinalaszlo.com/docs#outcomes");
+    if (!OUTCOME_NAMES.includes(name)) throw new TypeError(`recordOutcome: name must be one of ${OUTCOME_NAMES.join(", ")}, got ${JSON.stringify(name)}. docs: https://alg.katrinalaszlo.com/docs#outcomes`);
+    if (typeof idempotencyKey !== "string" || idempotencyKey === "" || idempotencyKey.length > 200) throw new TypeError("recordOutcome: idempotencyKey is required (1 to 200 characters): your payment event id or signup id, so a retried webhook never counts twice. docs: https://alg.katrinalaszlo.com/docs#outcomes");
     const hasValue = value !== undefined && value !== null;
-    if (hasValue && (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)) throw new TypeError(`recordOutcome: value must be a whole number of minor units (1999 for $19.99), 0 or more, got ${typeof value === "string" ? `string ${JSON.stringify(value)}` : String(value)}. docs: https://traffic.katrinalaszlo.com/docs#outcomes`);
-    if (hasValue && !/^[A-Z]{3}$/.test(String(currency))) throw new TypeError(`recordOutcome: currency must be an ISO 4217 code such as USD when value is set, got ${JSON.stringify(currency)}. docs: https://traffic.katrinalaszlo.com/docs#outcomes`);
-    if (name === "paid" && !hasValue) throw new TypeError("recordOutcome: a paid outcome needs value (minor units) and currency. docs: https://traffic.katrinalaszlo.com/docs#outcomes");
+    if (hasValue && (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)) throw new TypeError(`recordOutcome: value must be a whole number of minor units (1999 for $19.99), 0 or more, got ${typeof value === "string" ? `string ${JSON.stringify(value)}` : String(value)}. docs: https://alg.katrinalaszlo.com/docs#outcomes`);
+    if (hasValue && !/^[A-Z]{3}$/.test(String(currency))) throw new TypeError(`recordOutcome: currency must be an ISO 4217 code such as USD when value is set, got ${JSON.stringify(currency)}. docs: https://alg.katrinalaszlo.com/docs#outcomes`);
+    if (name === "paid" && !hasValue) throw new TypeError("recordOutcome: a paid outcome needs value (minor units) and currency. docs: https://alg.katrinalaszlo.com/docs#outcomes");
     const at = occurredAt === undefined ? new Date() : new Date(occurredAt);
     if (Number.isNaN(at.getTime())) throw new TypeError(`recordOutcome: occurredAt is not a date: ${JSON.stringify(occurredAt)}`);
     const event = {
