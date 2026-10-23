@@ -1,13 +1,13 @@
-# Agent traffic: install skill
+# Track: install skill
 
-[Agent traffic](https://alg.katrinalaszlo.com) shows which AI agents call your API, how their sessions go, and which errors end them. This repo is everything that runs on your side: an agent skill that installs it, the Express middleware it adds, and the script that checks the install.
+[Track](https://alg.katrinalaszlo.com) shows which AI agents call your API, how their sessions go, and which errors end them. This repo is everything that runs on your side: an agent skill that installs it, the Express middleware it adds, and the script that checks the install.
 
 ## Install with a coding agent
 
 Give your agent (Claude Code, Cursor, Codex) this prompt:
 
 ```
-Add agent traffic to this API: read https://alg.katrinalaszlo.com/SKILL.md and follow it.
+Add Track to this API: read https://alg.katrinalaszlo.com/SKILL.md and follow it.
 ```
 
 Or add the skill to your agent first:
@@ -29,7 +29,16 @@ const { agentTraffic } = require("@katrinalaszlo/track"); // or: import { agentT
 app.use(agentTraffic({ accountIdOf: (req, res) => req.user?.id }));
 ```
 
-Register it right after creating the app, before auth and routes. `accountIdOf` returns your customer's id (hashed before it leaves your server), or undefined. Optional `errorOf(req, res)` returns error text for failed responses (400 and above, up to 200 characters), so two errors with the same status show separately. It needs one variable, `AGENT_TRAFFIC_KEY`, in the environment or `.env`: the key belongs to one project, and events go there. Get it with `npx agent-led-growth connect`, which opens your browser to sign in and writes the key to `.env` for you, or with the signup in [SKILL.md](skills/agent-traffic/SKILL.md). `AGENT_TRAFFIC_ACCOUNT_SALT` is needed when you set `accountIdOf` or call `recordOutcome`. `AGENT_TRAFFIC_PROJECT_ID` is optional: set, it is sent with each batch as before.
+Register it right after creating the app, before auth and routes. `accountIdOf` returns your customer's id (hashed before it leaves your server), or undefined. Optional `errorOf(req, res)` returns error text for failed responses (400 and above, up to 200 characters), so two errors with the same status show separately. It needs one variable, `AGENT_TRAFFIC_KEY`, in the environment or `.env`: the key belongs to one project, and events go there. No account yet? This creates a free workspace and appends its key to `.env` without printing it (the first line adds a final newline to a `.env` that lacks one):
+
+```sh
+if [ -s .env ] && [ -n "$(tail -c 1 .env)" ]; then echo >> .env; fi
+curl -fsS -X POST "https://alg.katrinalaszlo.com/v1/signup?format=env" -H "Content-Type: application/json" -d '{"label":"my api","scopes":["read","write"]}' >> .env
+```
+
+Already have an account? Create a key on the Install page of your dashboard, or run `npx agent-led-growth connect`, which opens your browser to sign in and writes the key to `.env` for you. The full install steps are in [SKILL.md](https://github.com/katrinalaszlo/track-skill/blob/main/skills/agent-traffic/SKILL.md).
+
+`AGENT_TRAFFIC_ACCOUNT_SALT` is needed when you set `accountIdOf` or call `recordOutcome`. `AGENT_TRAFFIC_PROJECT_ID` is optional: set, it is sent with each batch as before.
 
 Per request it sends the route pattern, the path (see below), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, the hashed customer id, the journey key if the request carried one (see below), and the text `errorOf` returns if you set it. When an agent signed its request (Web Bot Auth, `Signature` and `Signature-Input` headers present) it also sends those two headers, the request's full URL, and the other headers the signature covers, so the signature can be checked; never `Authorization` or `Cookie`, whatever the signer covered. Otherwise no bodies, no other headers, no IPs. To see which agents lead to signups and payments, call `traffic.recordOutcome({ accountId, name: "paid", value: 1999, currency: "USD", idempotencyKey: paymentEvent.id })` from your payment webhook (and `name: "signup"` from your signup handler): the outcome joins the agent session of the same customer. Events go out in batches once a second (at once on Vercel, Lambda and Netlify), and it never fails a request. The one request it holds up is a person opening a handoff link (below), for at most 2 seconds. No dependencies; TypeScript types included.
 
@@ -74,6 +83,8 @@ For a signed request (Web Bot Auth), the signature material still carries the fu
 What each event contains, and the raw HTTP API for other stacks: [alg.katrinalaszlo.com/docs](https://alg.katrinalaszlo.com/docs).
 
 ## Tests
+
+From a clone of [katrinalaszlo/track-skill](https://github.com/katrinalaszlo/track-skill) (the npm package ships only the middleware and its types):
 
 ```sh
 npm test
