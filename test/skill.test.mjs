@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
-import { eventName, agentTraffic, signatureMaterial, JOURNEY_HEADER } from "../skills/agent-traffic/agent-traffic.cjs";
+import { eventName, agentTraffic, signatureMaterial, JOURNEY_HEADER, HANDOFF_PARAM } from "../skills/agent-traffic/agent-traffic.cjs";
 
 const run = promisify(execFile);
 
@@ -632,5 +632,188 @@ describe("path", () => {
     } finally {
       errors.mock.restore();
     }
+  });
+});
+
+describe("handoffs", () => {
+  const AGENT_JOURNEY = "j_agent_journey_0001";
+  const PERSON_JOURNEY = "j_person_journey_0002";
+  const TOKEN = `h_${"T".repeat(43)}`;
+  const NOT_LINKED = "The handoff token was not linked: it is unknown, expired or already used. The event was stored without it.";
+  const calls = [];
+  let handoffs;
+  let events;
+  let original;
+
+  // fetch answers /v1/handoffs with handoffs(body) and /v1/events with events(batch); every call is kept.
+  before(() => {
+    original = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      const body = JSON.parse(init.body);
+      calls.push({ url, body, signal: init.signal });
+      const answer = url.includes("/v1/handoffs") ? await handoffs(body) : await events(body);
+      return { status: answer.status, json: async () => answer.body };
+    };
+  });
+  after(() => { globalThis.fetch = original; });
+
+  function fakeResponse() {
+    const headers = {};
+    const res = new EventEmitter();
+    res.setHeader = (name, value) => { headers[name.toLowerCase()] = value; };
+    res.getHeader = (name) => headers[name.toLowerCase()];
+    res.headers = headers;
+    return res;
+  }
+
+  // One request through the middleware: waits for next(), finishes the response, and waits for its event to be sent.
+  async function visit(traffic, { url = "/checkout", headers = {} } = {}) {
+    const symbol = Symbol.for("@vercel/request-context");
+    const waited = [];
+    globalThis[symbol] = { get: () => ({ waitUntil: (p) => waited.push(p) }) };
+    const req = { method: "GET", baseUrl: "", route: { path: "/checkout" }, headers: { "user-agent": "Mozilla/5.0 Safari", ...headers }, url, originalUrl: url };
+    const res = fakeResponse();
+    try {
+      await new Promise((resolve) => traffic(req, res, resolve));
+      res.statusCode = 200;
+      res.emit("finish");
+      await Promise.all(waited);
+    } finally {
+      delete globalThis[symbol];
+    }
+    return { req, res };
+  }
+
+  const eventsSent = () => calls.filter((call) => call.url.includes("/v1/events")).flatMap((call) => call.body);
+  const accepted = (batch) => ({ status: 202, body: { accepted: batch.length, rejected: [] } });
+  const linked = (batch) => ({
+    status: 202,
+    body: { accepted: batch.length, rejected: [], journeys: batch.filter((e) => e.handoff_token).map((e) => ({ idempotency_key: e.idempotency_key, journey_id: AGENT_JOURNEY, journey_source: "handoff" })) },
+  });
+
+  test("the query parameter is track_h", () => {
+    assert.equal(HANDOFF_PARAM, "track_h");
+  });
+
+  test("handoffUrl asks Track for a token for the request's journey and appends it, keeping the link's own query", async () => {
+    calls.length = 0;
+    handoffs = async () => ({ status: 201, body: { token: TOKEN, param: "track_h", journey_id: AGENT_JOURNEY, expires_at: "2026-10-24T00:00:00.000Z" } });
+    events = accepted;
+    const traffic = agentTraffic({ key: "ark_k", projectId: "p 1", endpoint: "https://track.test" });
+    const { req } = await visit(traffic, { url: "/v1/docs", headers: { "track-journey": AGENT_JOURNEY } });
+    const link = await traffic.handoffUrl("https://shop.example/checkout?plan=pro", { req });
+    assert.equal(link, `https://shop.example/checkout?plan=pro&track_h=${TOKEN}`);
+    const minted = calls.find((call) => call.url.includes("/v1/handoffs"));
+    assert.equal(minted.url, "https://track.test/v1/handoffs?project_id=p%201");
+    assert.deepEqual(minted.body, { journey_id: AGENT_JOURNEY });
+    assert.equal(await traffic.handoffUrl("https://shop.example/verify", { journeyId: "j_given_journey_01" }), `https://shop.example/verify?track_h=${TOKEN}`);
+    assert.deepEqual(calls.at(-1).body, { journey_id: "j_given_journey_01" });
+  });
+
+  test("handoffUrl throws at once for a relative link or when there is no journey to hand off", () => {
+    const traffic = agentTraffic({ key: "k", projectId: "p" });
+    assert.throws(() => traffic.handoffUrl("/checkout", { journeyId: AGENT_JOURNEY }), /absolute URL/);
+    assert.throws(() => traffic.handoffUrl("https://shop.example/checkout", {}), /no journey to hand off/);
+    assert.throws(() => traffic.handoffUrl("https://shop.example/checkout", { req: { headers: {}, url: "/" } }), /no journey to hand off/);
+    assert.throws(() => traffic.handoffUrl("https://shop.example/checkout", { journeyId: "bad key" }), /no journey to hand off/);
+  });
+
+  test("when Track cannot mint a token, the link comes back unchanged and the failure is logged", async () => {
+    const errors = mock.method(console, "error", () => {});
+    try {
+      const traffic = agentTraffic({ key: "k", projectId: "p" });
+      handoffs = async () => ({ status: 429, body: { error: "rate_limited", message: "Try again in a minute." } });
+      assert.equal(await traffic.handoffUrl("https://shop.example/checkout", { journeyId: AGENT_JOURNEY }), "https://shop.example/checkout");
+      handoffs = async () => { throw new Error("network down"); };
+      assert.equal(await traffic.handoffUrl("https://shop.example/checkout", { journeyId: AGENT_JOURNEY }), "https://shop.example/checkout");
+      assert.deepEqual(errors.mock.calls.map((call) => call.arguments[0]), [
+        "agent-traffic: handoff link sent without a token: 429 rate_limited: Try again in a minute.",
+        "agent-traffic: handoff link sent without a token: network down",
+      ]);
+    } finally {
+      errors.mock.restore();
+    }
+  });
+
+  test("a person arriving with ?track_h= is linked before the response: the cookie and the request's event carry the agent's journey", async () => {
+    calls.length = 0;
+    events = linked;
+    const traffic = agentTraffic({ key: "k", projectId: "p", issueJourneyKeys: true });
+    const { req, res } = await visit(traffic, { url: `/checkout?plan=pro&track_h=${TOKEN}`, headers: { cookie: `track_j=${PERSON_JOURNEY}` } });
+    const [claim, own] = eventsSent();
+    assert.equal(claim.name, "handoff_opened");
+    assert.equal(claim.handoff_token, TOKEN);
+    assert.equal(claim.path, "/checkout");
+    assert.deepEqual([claim.journey_id, claim.journey_source], [PERSON_JOURNEY, "cookie"]);
+    assert.ok(calls[0].signal, "the claim waits a bounded time");
+    assert.equal(res.headers["set-cookie"], `track_j=${AGENT_JOURNEY}; Path=/; Max-Age=1209600; SameSite=Lax; Secure`);
+    assert.equal(res.headers[JOURNEY_HEADER.toLowerCase()], AGENT_JOURNEY);
+    assert.deepEqual([own.name, own.path, own.journey_id, own.journey_source], ["checkout", "/checkout", AGENT_JOURNEY, "issued"]);
+    assert.equal("handoff_token" in own, false);
+    assert.equal(JSON.stringify(own).includes(TOKEN), false);
+    assert.equal(traffic.journeyIdOf(req), AGENT_JOURNEY);
+  });
+
+  test("with issueJourneyKeys off no cookie is set, and journeyIdOf tells the app the agent's journey", async () => {
+    calls.length = 0;
+    events = linked;
+    const traffic = agentTraffic({ key: "k", projectId: "p" });
+    const { req, res } = await visit(traffic, { url: `/checkout?track_h=${TOKEN}` });
+    assert.deepEqual(res.headers, {});
+    const [claim, own] = eventsSent();
+    assert.equal("journey_id" in claim, false);
+    assert.deepEqual([own.journey_id, own.journey_source], [AGENT_JOURNEY, "issued"]);
+    assert.equal(traffic.journeyIdOf(req), AGENT_JOURNEY);
+  });
+
+  test("a token that does not link, or Track being down, leaves the person's own journey and logs no token", async () => {
+    const errors = mock.method(console, "error", () => {});
+    try {
+      calls.length = 0;
+      events = async (batch) => (batch[0].handoff_token
+        ? { status: 202, body: { accepted: 1, rejected: [], event_warnings: [{ idempotency_key: batch[0].idempotency_key, warning: "handoff_not_linked", message: NOT_LINKED }] } }
+        : accepted(batch));
+      const traffic = agentTraffic({ key: "k", projectId: "p", issueJourneyKeys: true });
+      const used = await visit(traffic, { url: `/checkout?track_h=${TOKEN}`, headers: { cookie: `track_j=${PERSON_JOURNEY}` } });
+      assert.equal(used.res.headers["set-cookie"], `track_j=${PERSON_JOURNEY}; Path=/; Max-Age=1209600; SameSite=Lax; Secure`);
+      const own = eventsSent()[1];
+      assert.deepEqual([own.journey_id, own.journey_source], [PERSON_JOURNEY, "cookie"]);
+
+      events = async (batch) => {
+        if (batch[0].handoff_token) throw new Error("connect ECONNREFUSED");
+        return accepted(batch);
+      };
+      const down = await visit(traffic, { url: `/checkout?track_h=${TOKEN}`, headers: { cookie: `track_j=${PERSON_JOURNEY}` } });
+      assert.equal(traffic.journeyIdOf(down.req), PERSON_JOURNEY);
+
+      const lines = errors.mock.calls.map((call) => call.arguments[0]);
+      assert.deepEqual(lines, [`agent-traffic: handoff not linked: ${NOT_LINKED}`, "agent-traffic: handoff not linked: connect ECONNREFUSED"]);
+      assert.equal(lines.some((line) => line.includes(TOKEN)), false);
+    } finally {
+      errors.mock.restore();
+    }
+  });
+
+  test("an older Track host that does not take handoff tokens is named in the log", async () => {
+    const errors = mock.method(console, "error", () => {});
+    try {
+      events = async (batch) => (batch[0].handoff_token
+        ? { status: 202, body: { accepted: 0, rejected: [{ idempotency_key: batch[0].idempotency_key, reason: "unknown_field", field: "handoff_token" }] } }
+        : accepted(batch));
+      await visit(agentTraffic({ key: "k", projectId: "p" }), { url: `/checkout?track_h=${TOKEN}` });
+      assert.match(errors.mock.calls[0].arguments[0], /^agent-traffic: handoff not linked: event rejected: unknown_field\. The agent traffic host is older than this package \(0\.7\.0\)/);
+    } finally {
+      errors.mock.restore();
+    }
+  });
+
+  test("a track_h that is not a token is ignored: no call to Track before the response, next() at once", () => {
+    calls.length = 0;
+    events = accepted;
+    const traffic = agentTraffic({ key: "k", projectId: "p" });
+    let nextCalled = false;
+    traffic({ method: "GET", baseUrl: "", route: { path: "/checkout" }, headers: {}, url: "/checkout?track_h=nope", originalUrl: "/checkout?track_h=nope" }, fakeResponse(), () => { nextCalled = true; });
+    assert.equal(nextCalled, true);
+    assert.equal(calls.length, 0);
   });
 });
