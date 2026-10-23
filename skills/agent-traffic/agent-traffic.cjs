@@ -11,10 +11,10 @@
 // accountIdOf returns your customer's id for the request (called with req and res after the response, so values your
 // auth set on either, such as req.user or res.locals.user, are there), or undefined. errorOf, optional, returns the
 // error text for a failed response (status 400 and above), such as an error code your handler put in res.locals, so
-// two errors with the same status show as different rows in Fix next. AGENT_TRAFFIC_KEY,
-// AGENT_TRAFFIC_PROJECT_ID and AGENT_TRAFFIC_ACCOUNT_SALT come from the environment, or from a .env in the working
-// directory, this file's folder or any folder above it, when the environment lacks them; only AGENT_TRAFFIC_ lines are
-// read, nothing else in .env is touched. issueJourneyKeys, optional and off by default, gives each visitor a journey key
+// two errors with the same status show as different rows in Fix next. AGENT_TRAFFIC_KEY (required),
+// AGENT_TRAFFIC_ACCOUNT_SALT and AGENT_TRAFFIC_PROJECT_ID (optional: without it the key's own project is used) come from
+// the environment, or from a .env in the working directory, this file's folder or any folder above it, when the
+// environment lacks them; only AGENT_TRAFFIC_ lines are read, nothing else in .env is touched. issueJourneyKeys, optional and off by default, gives each visitor a journey key
 // on the response (a header and a track_j cookie) so its later requests join one journey.
 //
 // Register it right after creating the app, before auth and routes. It never blocks or fails a request: events are
@@ -170,9 +170,9 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
   projectId ??= env.AGENT_TRAFFIC_PROJECT_ID;
   salt ??= env.AGENT_TRAFFIC_ACCOUNT_SALT;
   endpoint ??= env.AGENT_TRAFFIC_ENDPOINT ?? "https://alg.katrinalaszlo.com";
-  if (!key || !projectId) throw new Error("agentTraffic needs AGENT_TRAFFIC_KEY and AGENT_TRAFFIC_PROJECT_ID, in the environment or in .env.");
+  if (!key) throw new Error("agentTraffic needs AGENT_TRAFFIC_KEY, in the environment or in .env. Run `npx agent-led-growth connect` to get one.");
   if (accountIdOf && !salt) throw new Error("agentTraffic needs AGENT_TRAFFIC_ACCOUNT_SALT, in the environment or in .env, to hash what accountIdOf returns.");
-  const url = `${endpoint}/v1/events?project_id=${encodeURIComponent(projectId)}`;
+  const url = projectId ? `${endpoint}/v1/events?project_id=${encodeURIComponent(projectId)}` : `${endpoint}/v1/events`;
   let queue = [];
   let timer = null;
   const warned = new Set();

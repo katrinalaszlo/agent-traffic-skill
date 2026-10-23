@@ -7,7 +7,7 @@ export interface AgentTrafficOptions {
   errorOf?: (req: any, res: any) => string | null | undefined;
   /** Defaults to AGENT_TRAFFIC_KEY from the environment or .env. */
   key?: string;
-  /** Defaults to AGENT_TRAFFIC_PROJECT_ID from the environment or .env. */
+  /** Defaults to AGENT_TRAFFIC_PROJECT_ID from the environment or .env. Optional: without it, events go to the key's own project. */
   projectId?: string;
   /** Defaults to AGENT_TRAFFIC_ACCOUNT_SALT from the environment or .env. Required when accountIdOf is set. */
   salt?: string;

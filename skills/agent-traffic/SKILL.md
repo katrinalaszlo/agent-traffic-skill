@@ -60,4 +60,4 @@ On a `FAIL` line, fix what it says and repeat step 3. `WARN` lines are for the u
 
 ## Hand off
 
-Tell the user: the dashboard is at https://alg.katrinalaszlo.com/login (sign in with `AGENT_TRAFFIC_KEY` from `.env`); which field `accountIdOf` returns; that production needs the three `AGENT_TRAFFIC_` values from `.env`, with the same salt everywhere; and that on serverless hosts (Vercel functions, Lambda) events can be lost when the process freezes after the response.
+Tell the user: the dashboard is at https://alg.katrinalaszlo.com/login (sign in with `AGENT_TRAFFIC_KEY` from `.env`); which field `accountIdOf` returns; that production needs `AGENT_TRAFFIC_KEY` and `AGENT_TRAFFIC_ACCOUNT_SALT` from `.env`, with the same salt everywhere (`AGENT_TRAFFIC_PROJECT_ID` is optional: the key already names its project); and that on serverless hosts (Vercel functions, Lambda) events can be lost when the process freezes after the response.
