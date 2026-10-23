@@ -2,7 +2,11 @@
 // response is sent. npm package @katrinalaszlo/agent-traffic; source https://github.com/katrinalaszlo/agent-traffic-skill. Node 18+.
 //
 //   const { agentTraffic } = require("@katrinalaszlo/agent-traffic");   // or: import { agentTraffic } from "@katrinalaszlo/agent-traffic";
-//   app.use(agentTraffic({ accountIdOf: (req, res) => req.user?.id }));
+//   const traffic = agentTraffic({ accountIdOf: (req, res) => req.user?.id });
+//   app.use(traffic);
+//   // From your signup handler and your payment webhook: the outcome an agent's session led to.
+//   await traffic.recordOutcome({ accountId: user.id, name: "signup", idempotencyKey: user.id });
+//   await traffic.recordOutcome({ accountId: customer.id, name: "paid", value: 1999, currency: "USD", idempotencyKey: paymentEvent.id });
 //
 // accountIdOf returns your customer's id for the request (called with req and res after the response, so values your
 // auth set on either, such as req.user or res.locals.user, are there), or undefined. errorOf, optional, returns the
@@ -19,6 +23,7 @@ const { existsSync, readFileSync } = require("node:fs");
 const { dirname, join } = require("node:path");
 
 const BATCH_MAX = 25;
+const OUTCOME_NAMES = ["signup", "key_created", "activation", "paid", "custom"];
 const FLUSH_MS = 1000;
 const RETRIES_MAX = 3;
 const ERROR_MAX = 200;
@@ -66,6 +71,42 @@ function agentTrafficEnv() {
   return values;
 }
 
+// Web Bot Auth: when an agent signed its request (Signature and Signature-Input headers), the event carries what ingest
+// needs to check the signature: those two headers, the method and absolute URL, and only the other headers the
+// signature covers. Never a credential header, whatever the signer covered. An unsigned request adds nothing.
+const SIGNATURE_HEADERS = ["signature", "signature-input", "signature-agent"];
+const FORBIDDEN_COVERED = ["authorization", "proxy-authorization", "cookie", "set-cookie"];
+
+// The header names a Signature-Input covers: the quoted strings inside its parentheses that are not @-derived components.
+function coveredHeaderNames(signatureInput) {
+  const names = [];
+  for (const group of signatureInput.matchAll(/\(([^)]*)\)/g)) {
+    for (const item of group[1].matchAll(/"([^"]+)"/g)) if (!item[1].startsWith("@")) names.push(item[1].toLowerCase());
+  }
+  return names;
+}
+
+function signatureMaterial(req) {
+  const signature = req.headers.signature;
+  const signatureInput = req.headers["signature-input"];
+  if (typeof signature !== "string" || typeof signatureInput !== "string") return {};
+  const covered = {};
+  for (const name of coveredHeaderNames(signatureInput)) {
+    if (SIGNATURE_HEADERS.includes(name) || FORBIDDEN_COVERED.includes(name) || req.headers[name] === undefined) continue;
+    covered[name] = Array.isArray(req.headers[name]) ? req.headers[name].join(", ") : String(req.headers[name]);
+  }
+  // req.protocol honours Express's trust proxy setting, so behind a proxy the URL is the one the agent signed.
+  const host = req.headers.host;
+  const url = typeof host === "string" && host !== "" ? `${req.protocol ?? "https"}://${host}${req.originalUrl ?? req.url ?? "/"}` : undefined;
+  return {
+    signature,
+    signature_input: signatureInput,
+    method: String(req.method ?? "GET").toUpperCase(),
+    ...(url ? { url } : {}),
+    ...(Object.keys(covered).length > 0 ? { covered_headers: covered } : {}),
+  };
+}
+
 function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } = {}) {
   const env = agentTrafficEnv();
   key ??= env.AGENT_TRAFFIC_KEY;
@@ -77,6 +118,7 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
   const url = `${endpoint}/v1/events?project_id=${encodeURIComponent(projectId)}`;
   let queue = [];
   let timer = null;
+  const warned = new Set();
 
   async function send(batch, attempt) {
     let failure = null;
@@ -88,8 +130,24 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
       });
       const body = await res.json();
       if (res.status === 202) {
+        // A key inside its rotation grace window: said once per process, not once per batch.
+        for (const warning of body.warnings ?? []) {
+          if (!warned.has(warning)) {
+            warned.add(warning);
+            console.error(`agent-traffic: ${warning}`);
+          }
+        }
+        // One line per reason per batch, not one per event. An unknown field means this host is older than this
+        // package: say which field and what to do, instead of a uuid per event.
+        const byReason = new Map();
         for (const entry of body.rejected) {
-          if (entry.reason !== "duplicate") console.error(`agent-traffic: rejected ${entry.idempotency_key}: ${entry.reason}`);
+          if (entry.reason === "duplicate") continue;
+          const label = entry.reason === "unknown_field" ? `unknown_field (${entry.field ?? "?"})` : entry.reason;
+          byReason.set(label, (byReason.get(label) ?? 0) + 1);
+        }
+        for (const [label, n] of byReason) {
+          const hint = label.startsWith("unknown_field") ? ". The agent traffic host does not know this field yet: it is older than this package (0.3.0). Upgrade the host, or pin @katrinalaszlo/agent-traffic to 0.2.x. https://traffic.katrinalaszlo.com/docs#event-fields" : "";
+          console.error(`agent-traffic: ${n} of ${batch.length} events rejected: ${label}${hint}`);
         }
         return;
       }
@@ -115,7 +173,39 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
     while (queue.length > 0) send(queue.splice(0, BATCH_MAX), 1);
   }
 
-  return function agentTrafficMiddleware(req, res, next) {
+  const hashAccountId = (accountId) => createHmac("sha256", salt).update(String(accountId)).digest("hex");
+
+  // An outcome is sent at once, not batched: there are few of them and each one is money or a signup. Returns a
+  // promise that settles when the send has finished (sent, or logged and dropped); nothing it does can throw into
+  // your handler after validation. Bad input throws synchronously, at your call site, with the field named: that is
+  // your bug to see now, not a rejection to find in a log later.
+  function recordOutcome({ accountId, name, value, currency, idempotencyKey, occurredAt } = {}) {
+    if (!salt) throw new TypeError("recordOutcome needs AGENT_TRAFFIC_ACCOUNT_SALT (or the salt option) to hash accountId, the same salt the middleware uses. docs: https://traffic.katrinalaszlo.com/docs#outcomes");
+    if (accountId === undefined || accountId === null || String(accountId) === "") throw new TypeError("recordOutcome: accountId is required: the same customer id accountIdOf returns, so the outcome joins the agent's session. docs: https://traffic.katrinalaszlo.com/docs#outcomes");
+    if (!OUTCOME_NAMES.includes(name)) throw new TypeError(`recordOutcome: name must be one of ${OUTCOME_NAMES.join(", ")}, got ${JSON.stringify(name)}. docs: https://traffic.katrinalaszlo.com/docs#outcomes`);
+    if (typeof idempotencyKey !== "string" || idempotencyKey === "" || idempotencyKey.length > 200) throw new TypeError("recordOutcome: idempotencyKey is required (1 to 200 characters): your payment event id or signup id, so a retried webhook never counts twice. docs: https://traffic.katrinalaszlo.com/docs#outcomes");
+    const hasValue = value !== undefined && value !== null;
+    if (hasValue && (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)) throw new TypeError(`recordOutcome: value must be a whole number of minor units (1999 for $19.99), 0 or more, got ${typeof value === "string" ? `string ${JSON.stringify(value)}` : String(value)}. docs: https://traffic.katrinalaszlo.com/docs#outcomes`);
+    if (hasValue && !/^[A-Z]{3}$/.test(String(currency))) throw new TypeError(`recordOutcome: currency must be an ISO 4217 code such as USD when value is set, got ${JSON.stringify(currency)}. docs: https://traffic.katrinalaszlo.com/docs#outcomes`);
+    if (name === "paid" && !hasValue) throw new TypeError("recordOutcome: a paid outcome needs value (minor units) and currency. docs: https://traffic.katrinalaszlo.com/docs#outcomes");
+    const at = occurredAt === undefined ? new Date() : new Date(occurredAt);
+    if (Number.isNaN(at.getTime())) throw new TypeError(`recordOutcome: occurredAt is not a date: ${JSON.stringify(occurredAt)}`);
+    const event = {
+      idempotency_key: idempotencyKey,
+      name,
+      occurred_at: at.toISOString(),
+      source: "sdk",
+      account_id: hashAccountId(accountId),
+      outcome: { name, ...(hasValue ? { value, currency } : {}) },
+      properties: {},
+    };
+    const vercel = globalThis[VERCEL_CONTEXT]?.get?.();
+    const sending = send([event], 1);
+    vercel?.waitUntil?.(sending);
+    return sending;
+  }
+
+  function agentTrafficMiddleware(req, res, next) {
     const occurredAt = new Date().toISOString();
     // Read while the request is current: the context is per request.
     const vercel = globalThis[VERCEL_CONTEXT]?.get?.();
@@ -139,7 +229,9 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
       else if (!timer) timer = setTimeout(flush, FLUSH_MS).unref();
     });
     next();
-  };
+  }
+  agentTrafficMiddleware.recordOutcome = recordOutcome;
+  return agentTrafficMiddleware;
 
   function eventOf(req, res, occurredAt) {
     const accountId = accountIdOf ? accountIdOf(req, res) : undefined;
@@ -151,13 +243,14 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
       name: eventName(req),
       occurred_at: occurredAt,
       source: "sdk",
-      account_id: accountId ? createHmac("sha256", salt).update(String(accountId)).digest("hex") : undefined,
+      account_id: accountId ? hashAccountId(accountId) : undefined,
       user_agent: req.headers["user-agent"],
       accept_language: req.headers["accept-language"],
       signature_agent: req.headers["signature-agent"],
+      ...signatureMaterial(req),
       properties: { status_code: res.statusCode, method: req.method, ...(typeof error === "string" && error !== "" ? { error: error.slice(0, ERROR_MAX) } : {}) },
     };
   }
 }
 
-module.exports = { eventName, agentTraffic };
+module.exports = { eventName, agentTraffic, signatureMaterial };

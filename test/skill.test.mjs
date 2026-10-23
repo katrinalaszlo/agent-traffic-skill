@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
-import { eventName, agentTraffic } from "../skills/agent-traffic/agent-traffic.cjs";
+import { eventName, agentTraffic, signatureMaterial } from "../skills/agent-traffic/agent-traffic.cjs";
 
 const run = promisify(execFile);
 
@@ -41,6 +41,62 @@ describe("eventName", () => {
       req.params = { orderId: "42" };
       assert.equal(eventName(req), "orders_orderid");
       assert.equal(eventName(fakeRequest({ method: "POST", baseUrl, route: "/" })), "post");
+    }
+  });
+});
+
+describe("signatureMaterial (Web Bot Auth forwarding)", () => {
+  const INPUT = 'sig1=("@method" "@authority" "content-digest" "signature-agent";key="sig1" "authorization");created=1;expires=2;keyid="k";tag="web-bot-auth"';
+  const signed = (extra = {}) => ({
+    method: "post", protocol: "https", originalUrl: "/v1/charge?x=1", url: "/v1/charge?x=1",
+    headers: { host: "shop.example", signature: "sig1=:AAAA:", "signature-input": INPUT, "signature-agent": 'sig1="https://claude.ai"', "content-digest": "sha-256=:abc:", authorization: "Bearer secret", cookie: "s=1", "user-agent": "x", ...extra },
+  });
+
+  test("an unsigned request adds nothing", () => {
+    assert.deepEqual(signatureMaterial({ method: "GET", headers: { "user-agent": "x", "signature-agent": '"https://claude.ai"' } }), {});
+    assert.deepEqual(signatureMaterial({ method: "GET", headers: { signature: "sig1=:AAAA:" } }), {});
+  });
+
+  test("a signed request forwards the two headers, uppercase method, absolute URL, and only the covered non-credential headers", () => {
+    const out = signatureMaterial(signed());
+    assert.deepEqual(out, {
+      signature: "sig1=:AAAA:",
+      signature_input: INPUT,
+      method: "POST",
+      url: "https://shop.example/v1/charge?x=1",
+      covered_headers: { "content-digest": "sha-256=:abc:" },
+    });
+    assert.equal(JSON.stringify(out).includes("secret"), false);
+    assert.equal(JSON.stringify(out).includes("s=1"), false);
+  });
+
+  test("a covered header the request lacks is skipped; repeated header values join; no host means no url", () => {
+    const out = signatureMaterial(signed({ "content-digest": ["a", "b"] }));
+    assert.deepEqual(out.covered_headers, { "content-digest": "a, b" });
+    const noHost = signed(); delete noHost.headers.host;
+    assert.equal("url" in signatureMaterial(noHost), false);
+    const missing = signed(); delete missing.headers["content-digest"];
+    assert.equal("covered_headers" in signatureMaterial(missing), false);
+  });
+
+  test("the middleware puts the material on the event beside signature_agent", async () => {
+    const seen = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, init) => { seen.push(JSON.parse(init.body)); return { status: 202, json: async () => ({ accepted: 1, rejected: [] }) }; };
+    try {
+      const middleware = agentTraffic({ key: "ark_test", projectId: "p-1" });
+      const req = { ...signed(), baseUrl: "", route: { path: "/v1/charge" } };
+      const res = new EventEmitter();
+      middleware(req, res, () => {});
+      res.statusCode = 200;
+      res.emit("finish");
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      assert.equal(seen[0][0].signature_input, INPUT);
+      assert.equal(seen[0][0].url, "https://shop.example/v1/charge?x=1");
+      assert.equal(seen[0][0].signature_agent, 'sig1="https://claude.ai"');
+      assert.equal("authorization" in (seen[0][0].covered_headers ?? {}), false);
+    } finally {
+      globalThis.fetch = original;
     }
   });
 });
@@ -260,5 +316,90 @@ describe("agent-traffic.cjs as a file in a project", () => {
     await node(dir, "probe.cjs", { AGENT_TRAFFIC_KEY: "from_env", AGENT_TRAFFIC_PROJECT_ID: "p" });
     const err = await node(dir, "probe.cjs").catch((e) => e);
     assert.match(err.stderr, /needs AGENT_TRAFFIC_KEY and AGENT_TRAFFIC_PROJECT_ID, in the environment or in \.env/);
+  });
+});
+
+describe("rejection logging", () => {
+  test("rejections are coalesced per reason per batch; unknown_field names the field and the fix", async () => {
+    const errors = [];
+    const originalError = console.error;
+    const originalFetch = globalThis.fetch;
+    console.error = (line) => errors.push(line);
+    globalThis.fetch = async () => ({ status: 202, json: async () => ({ accepted: 0, rejected: [
+      { idempotency_key: "a", reason: "unknown_field", field: "outcome" }, { idempotency_key: "b", reason: "unknown_field", field: "outcome" },
+      { idempotency_key: "c", reason: "duplicate" }, { idempotency_key: "d", reason: "invalid_name" },
+    ] }) });
+    try {
+      const traffic = agentTraffic({ key: "ark_test", projectId: "p-1", salt: "s" });
+      await traffic.recordOutcome({ accountId: "a", name: "signup", idempotencyKey: "k1" });
+      assert.equal(errors.length, 2);
+      assert.match(errors[0], /^agent-traffic: 2 of 1 events rejected: unknown_field \(outcome\)\. The agent traffic host does not know this field yet/);
+      assert.match(errors[1], /^agent-traffic: 1 of 1 events rejected: invalid_name$/);
+    } finally {
+      console.error = originalError;
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("rotation warnings", () => {
+  test("a 202 with warnings is logged once per process, not once per batch", async () => {
+    const errors = [];
+    const originalError = console.error;
+    const originalFetch = globalThis.fetch;
+    console.error = (line) => errors.push(line);
+    globalThis.fetch = async () => ({ status: 202, json: async () => ({ accepted: 1, rejected: [], warnings: ["This key was rotated on X and stops working on Y. Set AGENT_TRAFFIC_KEY to the key that rotation returned and restart your server."] }) });
+    try {
+      const traffic = agentTraffic({ key: "ark_test", projectId: "p-1", salt: "s" });
+      await traffic.recordOutcome({ accountId: "a", name: "signup", idempotencyKey: "k1" });
+      await traffic.recordOutcome({ accountId: "a", name: "signup", idempotencyKey: "k2" });
+      assert.equal(errors.filter((line) => /was rotated on X/.test(line)).length, 1);
+    } finally {
+      console.error = originalError;
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("recordOutcome", () => {
+  const sent = [];
+  const withFetch = async (fn) => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, init) => { sent.push({ url, batch: JSON.parse(init.body) }); return { status: 202, json: async () => ({ accepted: 1, rejected: [] }) }; };
+    try { return await fn(); } finally { globalThis.fetch = original; }
+  };
+
+  test("hangs off the middleware, hashes accountId with the middleware's salt, and sends one event with an outcome block at once", async () => {
+    sent.length = 0;
+    const traffic = agentTraffic({ key: "ark_test", projectId: "p-1", salt: "s", accountIdOf: (req) => req.user?.id });
+    assert.equal(typeof traffic, "function");
+    await withFetch(() => traffic.recordOutcome({ accountId: "acct_1", name: "paid", value: 1999, currency: "USD", idempotencyKey: "evt_1", occurredAt: "2026-10-18T05:00:00Z" }));
+    assert.equal(sent.length, 1);
+    const [event] = sent[0].batch;
+    assert.deepEqual(event, {
+      idempotency_key: "evt_1", name: "paid", occurred_at: "2026-10-18T05:00:00.000Z", source: "sdk",
+      account_id: createHmac("sha256", "s").update("acct_1").digest("hex"),
+      outcome: { name: "paid", value: 1999, currency: "USD" }, properties: {},
+    });
+    await withFetch(() => traffic.recordOutcome({ accountId: 42, name: "signup", idempotencyKey: "acct_42" }));
+    assert.deepEqual(sent[1].batch[0].outcome, { name: "signup" });
+    assert.equal("value" in sent[1].batch[0].outcome, false);
+  });
+
+  test("bad input throws synchronously with the field named, before anything is sent", () => {
+    const traffic = agentTraffic({ key: "ark_test", projectId: "p-1", salt: "s" });
+    const cases = [
+      [{ name: "paid", value: 1, currency: "USD", idempotencyKey: "k" }, /accountId is required/],
+      [{ accountId: "a", name: "purchase", idempotencyKey: "k" }, /name must be one of signup, key_created/],
+      [{ accountId: "a", name: "signup" }, /idempotencyKey is required/],
+      [{ accountId: "a", name: "paid", value: "19.99", currency: "USD", idempotencyKey: "k" }, /value must be a whole number of minor units \(1999 for \$19\.99\), 0 or more, got string "19\.99"/],
+      [{ accountId: "a", name: "paid", value: 19.99, currency: "USD", idempotencyKey: "k" }, /value must be a whole number/],
+      [{ accountId: "a", name: "paid", value: 1999, currency: "usd", idempotencyKey: "k" }, /currency must be an ISO 4217 code/],
+      [{ accountId: "a", name: "paid", idempotencyKey: "k" }, /paid outcome needs value/],
+      [{ accountId: "a", name: "custom", value: 5, idempotencyKey: "k" }, /currency must be an ISO 4217 code/],
+      [{ accountId: "a", name: "signup", idempotencyKey: "k", occurredAt: "yesterday" }, /occurredAt is not a date/],
+    ];
+    for (const [input, message] of cases) assert.throws(() => traffic.recordOutcome(input), message, JSON.stringify(input));
+    assert.throws(() => agentTraffic({ key: "ark_test", projectId: "p-1" }).recordOutcome({ accountId: "a", name: "signup", idempotencyKey: "k" }), /needs AGENT_TRAFFIC_ACCOUNT_SALT/);
   });
 });
