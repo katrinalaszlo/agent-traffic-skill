@@ -126,8 +126,8 @@ describe("agentTraffic middleware", () => {
     res.emit("finish");
   }
 
-  test("refuses to start without key, project, or a salt for accountIdOf", () => {
-    assert.throws(() => agentTraffic({ projectId: "p" }), /needs AGENT_TRAFFIC_KEY and AGENT_TRAFFIC_PROJECT_ID/);
+  test("refuses to start without a key, or without a salt for accountIdOf", () => {
+    assert.throws(() => agentTraffic({ projectId: "p" }), /needs AGENT_TRAFFIC_KEY, in the environment or in \.env\. Run `npx agent-led-growth connect`/);
     assert.throws(() => agentTraffic({ key: "k", projectId: "p", accountIdOf: () => "a" }), /needs AGENT_TRAFFIC_ACCOUNT_SALT/);
   });
 
@@ -153,6 +153,17 @@ describe("agentTraffic middleware", () => {
     assert.equal(docs.name, "docs");
     assert.equal("account_id" in docs, false);
     assert.notEqual(charge.idempotency_key, docs.idempotency_key);
+  });
+
+  test("with a key and no project id, events go to /v1/events with no project_id, and the server uses the key's project", async () => {
+    sent.length = 0;
+    const middleware = agentTraffic({ key: "ark_test", endpoint: "https://track.test" });
+    request(middleware, fakeRequest({ route: "/v1/docs" }), 200);
+    mock.timers.tick(1000);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].url, "https://track.test/v1/events");
+    assert.equal(sent[0].init.headers.authorization, "Bearer ark_test");
   });
 
   test("sent events group dynamic mounts by route; raw ids appear only in path, the query nowhere", async () => {
@@ -316,8 +327,14 @@ describe("agent-traffic.cjs as a file in a project", () => {
   test("the environment wins over .env; with neither, it says what is missing", async () => {
     const dir = project({ ".env": "AGENT_TRAFFIC_KEY=from_file\n", "probe.cjs": 'const { agentTraffic } = require("./agent-traffic.cjs"); agentTraffic();' });
     await node(dir, "probe.cjs", { AGENT_TRAFFIC_KEY: "from_env", AGENT_TRAFFIC_PROJECT_ID: "p" });
-    const err = await node(dir, "probe.cjs").catch((e) => e);
-    assert.match(err.stderr, /needs AGENT_TRAFFIC_KEY and AGENT_TRAFFIC_PROJECT_ID, in the environment or in \.env/);
+    const empty = project({ ".env": "AGENT_TRAFFIC_PROJECT_ID=p\n", "probe.cjs": 'const { agentTraffic } = require("./agent-traffic.cjs"); agentTraffic();' });
+    const err = await node(empty, "probe.cjs").catch((e) => e);
+    assert.match(err.stderr, /needs AGENT_TRAFFIC_KEY, in the environment or in \.env/);
+  });
+
+  test("starts with only AGENT_TRAFFIC_KEY in .env: the project id is optional", async () => {
+    const dir = project({ ".env": "AGENT_TRAFFIC_KEY=ark_only\n", "probe.cjs": 'const { agentTraffic } = require("./agent-traffic.cjs"); console.log(typeof agentTraffic());' });
+    assert.equal((await node(dir, "probe.cjs")).stdout, "function\n");
   });
 });
 
@@ -386,6 +403,14 @@ describe("recordOutcome", () => {
     await withFetch(() => traffic.recordOutcome({ accountId: 42, name: "signup", idempotencyKey: "acct_42" }));
     assert.deepEqual(sent[1].batch[0].outcome, { name: "signup" });
     assert.equal("value" in sent[1].batch[0].outcome, false);
+  });
+
+  test("goes to the project id's URL when one is set, and to the key's project when none is", async () => {
+    sent.length = 0;
+    const outcome = { accountId: "a", name: "signup", idempotencyKey: "k" };
+    await withFetch(() => agentTraffic({ key: "ark_test", projectId: "p-1", salt: "s" }).recordOutcome(outcome));
+    await withFetch(() => agentTraffic({ key: "ark_test", salt: "s" }).recordOutcome(outcome));
+    assert.deepEqual(sent.map((s) => s.url), ["https://alg.katrinalaszlo.com/v1/events?project_id=p-1", "https://alg.katrinalaszlo.com/v1/events"]);
   });
 
   test("bad input throws synchronously with the field named, before anything is sent", () => {
