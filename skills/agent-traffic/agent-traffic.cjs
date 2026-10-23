@@ -17,8 +17,15 @@
 // read, nothing else in .env is touched. issueJourneyKeys, optional and off by default, gives each visitor a journey key
 // on the response (a header and a track_j cookie) so its later requests join one journey.
 //
-// Register it right after creating the app, before auth and routes. It never blocks or fails a request: events are
-// queued, sent in batches of up to 25 once a second, and a failed batch is logged and retried with the same keys.
+// Handoffs: when an agent sends a person a link to finish (approve a payment, verify an email), add a one-time token so
+// the person's actions count toward the agent's journey:
+//   const link = await traffic.handoffUrl("https://example.com/checkout?plan=pro", { req });   // adds ?track_h=<token>
+// A request that arrives with ?track_h= waits up to 2 seconds for Track to link it to the agent's journey, records a
+// handoff_opened event, and, with issueJourneyKeys on, sets the person's track_j cookie to the agent's journey.
+//
+// Register it right after creating the app, before auth and routes. It never fails a request, and blocks none but a
+// request carrying ?track_h=: events are queued, sent in batches of up to 25 once a second, and a failed batch is logged
+// and retried with the same keys.
 const { createHmac, randomBytes, randomUUID } = require("node:crypto");
 const { existsSync, readFileSync } = require("node:fs");
 const { dirname, join } = require("node:path");
@@ -30,6 +37,12 @@ const JOURNEY_PARAM = "track_j";
 const JOURNEY_KEY = /^[A-Za-z0-9_-]{8,128}$/;
 // 14 days. Secure so the key never travels over plain http; Lax so it comes along when a person follows a link in.
 const JOURNEY_COOKIE_ATTRIBUTES = "Path=/; Max-Age=1209600; SameSite=Lax; Secure";
+// The query parameter a handoff link carries, and the token shape Track mints. A token is a secret in transit: it goes
+// to Track only, never into a log or an error message.
+const HANDOFF_PARAM = "track_h";
+const HANDOFF_TOKEN = /^h_[A-Za-z0-9_-]{32,64}$/;
+// How long a request with ?track_h= waits for Track before it carries on unlinked.
+const HANDOFF_WAIT_MS = 2000;
 
 const BATCH_MAX = 25;
 const OUTCOME_NAMES = ["signup", "key_created", "activation", "paid", "custom"];
@@ -154,6 +167,15 @@ function journeyKeyOf(req) {
   return undefined;
 }
 
+// The ?track_h= value when it has the token shape, else undefined.
+function handoffTokenOf(req) {
+  const rawUrl = req.originalUrl ?? req.url;
+  const url = typeof rawUrl === "string" ? rawUrl : "";
+  const queryStart = url.indexOf("?");
+  if (queryStart === -1) return undefined;
+  return new URLSearchParams(url.slice(queryStart + 1)).getAll(HANDOFF_PARAM).find((value) => HANDOFF_TOKEN.test(value));
+}
+
 // Cache-Control: private so a shared cache never hands one visitor's key to another. A Set-Cookie an earlier
 // middleware added is kept.
 function setJourneyKey(res, journeyId) {
@@ -173,6 +195,9 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
   if (!key || !projectId) throw new Error("agentTraffic needs AGENT_TRAFFIC_KEY and AGENT_TRAFFIC_PROJECT_ID, in the environment or in .env.");
   if (accountIdOf && !salt) throw new Error("agentTraffic needs AGENT_TRAFFIC_ACCOUNT_SALT, in the environment or in .env, to hash what accountIdOf returns.");
   const url = `${endpoint}/v1/events?project_id=${encodeURIComponent(projectId)}`;
+  const handoffsUrl = `${endpoint}/v1/handoffs?project_id=${encodeURIComponent(projectId)}`;
+  // The journey key each request was recorded with, after a handoff link changed it; read by journeyIdOf and handoffUrl.
+  const journeys = new WeakMap();
   let queue = [];
   let timer = null;
   const warned = new Set();
@@ -203,7 +228,7 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
           byReason.set(label, (byReason.get(label) ?? 0) + 1);
         }
         for (const [label, n] of byReason) {
-          const hint = label.startsWith("unknown_field") ? ". The agent traffic host does not know this field yet: it is older than this package (0.6.0). Upgrade the host, or pin @katrinalaszlo/track to 0.5.x. https://alg.katrinalaszlo.com/docs#event-fields" : "";
+          const hint = label.startsWith("unknown_field") ? ". The agent traffic host does not know this field yet: it is older than this package (0.7.0). Upgrade the host, or pin @katrinalaszlo/track to 0.5.x. https://alg.katrinalaszlo.com/docs#event-fields" : "";
           console.error(`agent-traffic: ${n} of ${batch.length} events rejected: ${label}${hint}`);
         }
         return;
@@ -262,36 +287,116 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
     return sending;
   }
 
+  // The journey key the middleware recorded req with (the agent's journey when a handoff link linked it), or undefined.
+  function journeyIdOf(req) {
+    return journeys.get(req)?.journey_id;
+  }
+
+  // Resolves with link plus ?track_h=<token> for the agent's journey: journeyId, else the journey of req. Bad input
+  // throws synchronously. When Track cannot mint a token the failure is logged and the promise resolves with link
+  // unchanged, so the person still gets a working link; it just will not count toward the agent's journey.
+  function handoffUrl(link, { req, journeyId } = {}) {
+    let target;
+    try {
+      target = new URL(link);
+    } catch {
+      throw new TypeError("handoffUrl: link must be an absolute URL, such as https://example.com/checkout, because it is sent to a person.");
+    }
+    const journey = journeyId ?? (req ? journeyIdOf(req) ?? journeyKeyOf(req)?.journey_id : undefined);
+    if (typeof journey !== "string" || !JOURNEY_KEY.test(journey)) throw new TypeError("handoffUrl: no journey to hand off. Pass { req } for a request that carried a journey key (Track-Journey header, ?track_j= or the track_j cookie, or issueJourneyKeys on), or { journeyId }. docs: https://alg.katrinalaszlo.com/docs#handing-off-to-a-person");
+    return (async () => {
+      try {
+        const res = await fetch(handoffsUrl, {
+          method: "POST",
+          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+          body: JSON.stringify({ journey_id: journey }),
+        });
+        const body = await res.json();
+        if (res.status !== 201) {
+          console.error(`agent-traffic: handoff link sent without a token: ${res.status} ${body.error}: ${body.message}`);
+          return link;
+        }
+        target.searchParams.set(HANDOFF_PARAM, body.token);
+        return target.toString();
+      } catch (err) {
+        console.error(`agent-traffic: handoff link sent without a token: ${err.message}`);
+        return link;
+      }
+    })();
+  }
+
+  // Sends the event of a request that arrived with a handoff token, at once, and resolves with the agent's journey key
+  // when Track linked it, else null. Never rejects: a failure is logged (without the token) and the request carries on.
+  async function linkHandoff(event) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+        body: JSON.stringify([event]),
+        signal: AbortSignal.timeout(HANDOFF_WAIT_MS),
+      });
+      const body = await res.json();
+      if (res.status !== 202) {
+        console.error(`agent-traffic: handoff not linked: ${res.status} ${body.error}: ${body.message}`);
+        return null;
+      }
+      for (const entry of body.rejected) {
+        const hint = entry.reason === "unknown_field" ? ". The agent traffic host is older than this package (0.7.0) and does not take handoff tokens yet." : "";
+        console.error(`agent-traffic: handoff not linked: event rejected: ${entry.reason}${hint}`);
+      }
+      for (const warning of body.event_warnings ?? []) console.error(`agent-traffic: handoff not linked: ${warning.message}`);
+      return body.journeys?.[0]?.journey_id ?? null;
+    } catch (err) {
+      console.error(`agent-traffic: handoff not linked: ${err.message}`);
+      return null;
+    }
+  }
+
   function agentTrafficMiddleware(req, res, next) {
     const occurredAt = new Date().toISOString();
     // Read while the request is current: the context is per request.
     const vercel = globalThis[VERCEL_CONTEXT]?.get?.();
     let journey = journeyKeyOf(req);
     if (issueJourneyKeys && !journey) journey = { journey_id: `j_${randomBytes(16).toString("hex")}`, journey_source: "issued" };
-    if (issueJourneyKeys) setJourneyKey(res, journey.journey_id);
-    res.on("finish", () => {
-      // An exception here would be thrown outside the request, so it is logged instead: the event is lost, the
-      // server is not.
-      let event;
-      try {
-        event = eventOf(req, res, occurredAt, journey);
-      } catch (err) {
-        // The path only: the query string can hold an API key or a journey key, which never go in a log.
-        console.error(`agent-traffic: event not recorded for ${req.method} ${requestPath(req) ?? "(no path)"}: ${err.stack}`);
-        return;
-      }
-      if (SERVERLESS || vercel?.waitUntil) {
-        const sending = send([event], 1);
-        vercel?.waitUntil?.(sending);
-        return;
-      }
-      queue.push(event);
-      if (queue.length >= BATCH_MAX) flush();
-      else if (!timer) timer = setTimeout(flush, FLUSH_MS).unref();
-    });
-    next();
+    const handoffToken = handoffTokenOf(req);
+    if (!handoffToken) return record(journey);
+    // A handoff link: Track has to answer before the response, so the person's cookie can carry the agent's journey.
+    // The request's own event is still sent after the response, on the agent's journey with journey_source "issued":
+    // the key was given on this request, not read from it. Ingest takes "handoff" from no caller.
+    linkHandoff(handoffEventOf(req, occurredAt, journey, handoffToken)).then((agentJourney) => {
+      if (agentJourney) journey = { journey_id: agentJourney, journey_source: "issued" };
+      record(journey);
+    }).catch(next);
+
+    function record(journey) {
+      journeys.set(req, journey);
+      if (issueJourneyKeys) setJourneyKey(res, journey.journey_id);
+      res.on("finish", () => {
+        // An exception here would be thrown outside the request, so it is logged instead: the event is lost, the
+        // server is not.
+        let event;
+        try {
+          event = eventOf(req, res, occurredAt, journey);
+        } catch (err) {
+          // The path only: the query string can hold an API key, a journey key or a handoff token, which never go in a log.
+          console.error(`agent-traffic: event not recorded for ${req.method} ${requestPath(req) ?? "(no path)"}: ${err.stack}`);
+          return;
+        }
+        if (SERVERLESS || vercel?.waitUntil) {
+          const sending = send([event], 1);
+          vercel?.waitUntil?.(sending);
+          return;
+        }
+        queue.push(event);
+        if (queue.length >= BATCH_MAX) flush();
+        else if (!timer) timer = setTimeout(flush, FLUSH_MS).unref();
+      });
+      next();
+    }
   }
   agentTrafficMiddleware.recordOutcome = recordOutcome;
+  agentTrafficMiddleware.handoffUrl = handoffUrl;
+  agentTrafficMiddleware.journeyIdOf = journeyIdOf;
   return agentTrafficMiddleware;
 
   function eventOf(req, res, occurredAt, journey) {
@@ -314,6 +419,24 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
       properties: { status_code: res.statusCode, method: req.method, ...(typeof error === "string" && error !== "" ? { error: error.slice(0, ERROR_MAX) } : {}) },
     };
   }
+
+  // The event that carries a handoff token, sent before the response, so it has no status code and no account yet:
+  // the person's sign-in comes on their later requests.
+  function handoffEventOf(req, occurredAt, journey, handoffToken) {
+    return {
+      idempotency_key: randomUUID(),
+      name: "handoff_opened",
+      path: requestPath(req),
+      occurred_at: occurredAt,
+      source: "sdk",
+      user_agent: req.headers["user-agent"],
+      accept_language: req.headers["accept-language"],
+      signature_agent: req.headers["signature-agent"],
+      ...journey,
+      handoff_token: handoffToken,
+      properties: { method: req.method },
+    };
+  }
 }
 
-module.exports = { eventName, agentTraffic, signatureMaterial, JOURNEY_HEADER };
+module.exports = { eventName, agentTraffic, signatureMaterial, JOURNEY_HEADER, HANDOFF_PARAM };

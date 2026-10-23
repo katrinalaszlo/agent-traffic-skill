@@ -29,8 +29,18 @@ export const JOURNEY_HEADER: string;
 export interface JourneyFields {
   /** 8 to 128 characters of A-Z, a-z, 0-9, _ and -. */
   journey_id: string;
-  /** "issued" when issueJourneyKeys minted the key on this request's response. */
+  /** "issued" when issueJourneyKeys minted the key on this request's response, or a handoff link gave the request the agent's journey. */
   journey_source: "header" | "query" | "cookie" | "issued";
+}
+
+/** The query parameter a handoff link carries: "track_h". */
+export const HANDOFF_PARAM: string;
+
+export interface HandoffOptions {
+  /** A request the middleware saw: its journey key (after any handoff) is the agent's journey to hand off. */
+  req?: any;
+  /** The agent's journey key, when you have it without a request. Wins over req. */
+  journeyId?: string;
 }
 
 export interface OutcomeInput {
@@ -51,12 +61,21 @@ export interface AgentTrafficMiddleware {
   (req: any, res: any, next: (err?: unknown) => void): void;
   /** Sends one outcome at once. Throws synchronously on bad input; the returned promise settles when the send finished. */
   recordOutcome(outcome: OutcomeInput): Promise<void>;
+  /**
+   * Resolves with `link` plus `?track_h=<token>`, a one-time token (24 hours) that puts the person who opens the link
+   * on the agent's journey. Throws synchronously when link is not absolute or there is no valid journey key. When Track
+   * cannot mint a token, logs it and resolves with `link` unchanged.
+   */
+  handoffUrl(link: string, options: HandoffOptions): Promise<string>;
+  /** The journey key the middleware recorded this request with (the agent's, when a handoff link linked it), or undefined. */
+  journeyIdOf(req: any): string | undefined;
 }
 
 /**
  * Each event the middleware records carries `path`: the request path as the app received it (router mount prefix
  * included, not percent-decoded), cut at the first "?" or "#", so never the domain or the query. Left out when it does
  * not start with "/" or is longer than 2048 characters. Ids in path segments (/v1/users/123) are sent as they are.
+ * A request with a well-formed ?track_h= waits up to 2 seconds for Track to link it, before your routes run.
  */
 export function agentTraffic(options?: AgentTrafficOptions): AgentTrafficMiddleware;
 
