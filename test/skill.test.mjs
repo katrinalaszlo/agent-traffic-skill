@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
-import { eventName, agentTraffic, signatureMaterial } from "../skills/agent-traffic/agent-traffic.cjs";
+import { eventName, agentTraffic, signatureMaterial, JOURNEY_HEADER } from "../skills/agent-traffic/agent-traffic.cjs";
 
 const run = promisify(execFile);
 
@@ -402,4 +402,135 @@ describe("recordOutcome", () => {
     for (const [input, message] of cases) assert.throws(() => traffic.recordOutcome(input), message, JSON.stringify(input));
     assert.throws(() => agentTraffic({ key: "ark_test", projectId: "p-1" }).recordOutcome({ accountId: "a", name: "signup", idempotencyKey: "k" }), /needs AGENT_TRAFFIC_ACCOUNT_SALT/);
   });
+});
+
+describe("journey keys", () => {
+  const KEY_A = "journey_header_aaaa";
+  const KEY_B = "journey_query_bbbb";
+  const KEY_C = "journey_cookie_cccc";
+  const sent = [];
+  let original;
+  before(() => {
+    original = globalThis.fetch;
+    globalThis.fetch = async (url, init) => { sent.push(...JSON.parse(init.body)); return { status: 202, json: async () => ({ accepted: 1, rejected: [] }) }; };
+  });
+  after(() => { globalThis.fetch = original; });
+
+  function fakeResponse() {
+    const headers = {};
+    const res = new EventEmitter();
+    res.setHeader = (name, value) => { headers[name.toLowerCase()] = value; };
+    res.getHeader = (name) => headers[name.toLowerCase()];
+    res.headers = headers;
+    return res;
+  }
+
+  // One request through the middleware; resolves with the event it sent and the response headers it set.
+  async function send(options, { headers = {}, url = "/v1/docs", res = fakeResponse() } = {}) {
+    sent.length = 0;
+    const symbol = Symbol.for("@vercel/request-context");
+    const waited = [];
+    globalThis[symbol] = { get: () => ({ waitUntil: (p) => waited.push(p) }) };
+    try {
+      const middleware = agentTraffic({ key: "k", projectId: "p", ...options });
+      middleware({ method: "GET", baseUrl: "", route: { path: "/v1/docs" }, headers, url, originalUrl: url }, res, () => {});
+      res.statusCode = 200;
+      res.emit("finish");
+      await Promise.all(waited);
+    } finally {
+      delete globalThis[symbol];
+    }
+    return { event: sent[0], headers: res.headers };
+  }
+
+  const headerName = JOURNEY_HEADER.toLowerCase();
+
+  test("the journey header is the one exported constant", () => {
+    assert.equal(JOURNEY_HEADER, "Track-Journey");
+  });
+
+  test("header, query and cookie are each picked up with their journey_source", async () => {
+    assert.deepEqual(pick((await send({}, { headers: { [headerName]: KEY_A } })).event), { journey_id: KEY_A, journey_source: "header" });
+    assert.deepEqual(pick((await send({}, { url: `/v1/docs?x=1&track_j=${KEY_B}` })).event), { journey_id: KEY_B, journey_source: "query" });
+    assert.deepEqual(pick((await send({}, { headers: { cookie: `theme=dark; track_j=${KEY_C}; other=1` } })).event), { journey_id: KEY_C, journey_source: "cookie" });
+  });
+
+  test("header beats query beats cookie", async () => {
+    const all = { headers: { [headerName]: KEY_A, cookie: `track_j=${KEY_C}` }, url: `/v1/docs?track_j=${KEY_B}` };
+    assert.deepEqual(pick((await send({}, all)).event), { journey_id: KEY_A, journey_source: "header" });
+    assert.deepEqual(pick((await send({}, { ...all, headers: { cookie: `track_j=${KEY_C}` } })).event), { journey_id: KEY_B, journey_source: "query" });
+  });
+
+  test("an invalid value is ignored and never sent; the next valid source wins", async () => {
+    for (const bad of ["short", "has space here", "x".repeat(129), "semi;colon_value", "quote\"d_value"]) {
+      const { event } = await send({}, { headers: { [headerName]: bad, cookie: `track_j=${encodeURIComponent(bad)}` }, url: `/v1/docs?track_j=${encodeURIComponent(bad)}` });
+      assert.equal("journey_id" in event, false, bad);
+      assert.equal("journey_source" in event, false, bad);
+    }
+    const { event } = await send({}, { headers: { [headerName]: "bad key!", cookie: `track_j=${KEY_C}` }, url: "/v1/docs?track_j=no" });
+    assert.deepEqual(pick(event), { journey_id: KEY_C, journey_source: "cookie" });
+  });
+
+  test("nothing is sent when no key is present, and session_hint is never set", async () => {
+    const { event } = await send({});
+    assert.equal("journey_id" in event, false);
+    assert.equal("journey_source" in event, false);
+    assert.equal("session_hint" in event, false);
+    assert.equal("session_hint" in (await send({}, { headers: { [headerName]: KEY_A } })).event, false);
+  });
+
+  test("issueJourneyKeys is off by default: no header, no cookie, no Cache-Control", async () => {
+    const { headers } = await send({}, { headers: { [headerName]: KEY_A } });
+    assert.deepEqual(headers, {});
+    assert.deepEqual((await send({})).headers, {});
+  });
+
+  test("issueJourneyKeys mints a valid key when none was sent, on the header, the cookie and with Cache-Control: private", async () => {
+    const { headers, event } = await send({ issueJourneyKeys: true });
+    const minted = headers[headerName];
+    assert.match(minted, /^j_[0-9a-f]{32}$/);
+    assert.match(minted, /^[A-Za-z0-9_-]{8,128}$/);
+    assert.equal(headers["set-cookie"], `track_j=${minted}; Path=/; Max-Age=1209600; SameSite=Lax; Secure`);
+    assert.equal(headers["cache-control"], "private");
+    assert.equal("journey_id" in event, false);
+    assert.notEqual((await send({ issueJourneyKeys: true })).headers[headerName], minted);
+  });
+
+  test("issueJourneyKeys echoes a key the request carried and never mints one then", async () => {
+    for (const [request, key] of [[{ headers: { [headerName]: KEY_A } }, KEY_A], [{ url: `/v1/docs?track_j=${KEY_B}` }, KEY_B], [{ headers: { cookie: `track_j=${KEY_C}` } }, KEY_C]]) {
+      const { headers, event } = await send({ issueJourneyKeys: true }, request);
+      assert.equal(headers[headerName], key);
+      assert.equal(headers["set-cookie"], `track_j=${key}; Path=/; Max-Age=1209600; SameSite=Lax; Secure`);
+      assert.equal(headers["cache-control"], "private");
+      assert.equal(event.journey_id, key);
+    }
+  });
+
+  test("a Set-Cookie set before the middleware is kept", async () => {
+    const res = fakeResponse();
+    res.setHeader("Set-Cookie", "sid=1");
+    const { headers } = await send({ issueJourneyKeys: true }, { headers: { cookie: `track_j=${KEY_C}` }, res });
+    assert.deepEqual(headers["set-cookie"], ["sid=1", `track_j=${KEY_C}; Path=/; Max-Age=1209600; SameSite=Lax; Secure`]);
+  });
+
+  test("a journey key in the query never reaches a log", async () => {
+    const errors = mock.method(console, "error", () => {});
+    try {
+      const middleware = agentTraffic({ key: "k", projectId: "p", salt: "s", accountIdOf: (req) => req.user.id });
+      const res = fakeResponse();
+      const url = `/v1/docs?track_j=${KEY_B}`;
+      middleware({ method: "GET", baseUrl: "", route: { path: "/v1/docs" }, headers: { [headerName]: KEY_A }, url, originalUrl: url }, res, () => {});
+      res.statusCode = 200;
+      res.emit("finish");
+      assert.equal(errors.mock.calls.length, 1);
+      assert.match(errors.mock.calls[0].arguments[0], /event not recorded for GET \/v1\/docs:/);
+      assert.doesNotMatch(errors.mock.calls[0].arguments[0], new RegExp(`${KEY_A}|${KEY_B}`));
+    } finally {
+      errors.mock.restore();
+    }
+  });
+
+  function pick(event) {
+    return { journey_id: event.journey_id, journey_source: event.journey_source };
+  }
 });

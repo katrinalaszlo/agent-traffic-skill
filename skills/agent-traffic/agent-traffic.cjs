@@ -14,13 +14,22 @@
 // two errors with the same status show as different rows in Fix next. AGENT_TRAFFIC_KEY,
 // AGENT_TRAFFIC_PROJECT_ID and AGENT_TRAFFIC_ACCOUNT_SALT come from the environment, or from a .env in the working
 // directory, this file's folder or any folder above it, when the environment lacks them; only AGENT_TRAFFIC_ lines are
-// read, nothing else in .env is touched.
+// read, nothing else in .env is touched. issueJourneyKeys, optional and off by default, gives each visitor a journey key
+// on the response (a header and a track_j cookie) so its later requests join one journey.
 //
 // Register it right after creating the app, before auth and routes. It never blocks or fails a request: events are
 // queued, sent in batches of up to 25 once a second, and a failed batch is logged and retried with the same keys.
-const { createHmac, randomUUID } = require("node:crypto");
+const { createHmac, randomBytes, randomUUID } = require("node:crypto");
 const { existsSync, readFileSync } = require("node:fs");
 const { dirname, join } = require("node:path");
+
+// The request and response header that carries a journey key.
+const JOURNEY_HEADER = "Track-Journey";
+// The cookie name and the query parameter name.
+const JOURNEY_PARAM = "track_j";
+const JOURNEY_KEY = /^[A-Za-z0-9_-]{8,128}$/;
+// 14 days. Secure so the key never travels over plain http; Lax so it comes along when a person follows a link in.
+const JOURNEY_COOKIE_ATTRIBUTES = "Path=/; Max-Age=1209600; SameSite=Lax; Secure";
 
 const BATCH_MAX = 25;
 const OUTCOME_NAMES = ["signup", "key_created", "activation", "paid", "custom"];
@@ -107,7 +116,42 @@ function signatureMaterial(req) {
   };
 }
 
-function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } = {}) {
+// A journey key ties requests from one visitor together across sessions: the journey header, else ?track_j= in the URL,
+// else the track_j cookie. The first value that fits the ingest rule wins; one that does not is ignored, never sent.
+function journeyKeyOf(req) {
+  const header = req.headers[JOURNEY_HEADER.toLowerCase()];
+  if (typeof header === "string" && JOURNEY_KEY.test(header)) return { journey_id: header, journey_source: "header" };
+
+  const url = req.originalUrl ?? req.url ?? "";
+  const queryStart = url.indexOf("?");
+  if (queryStart !== -1) {
+    const fromQuery = new URLSearchParams(url.slice(queryStart + 1)).getAll(JOURNEY_PARAM).find((value) => JOURNEY_KEY.test(value));
+    if (fromQuery) return { journey_id: fromQuery, journey_source: "query" };
+  }
+
+  const cookieHeader = req.headers.cookie;
+  if (typeof cookieHeader === "string") {
+    for (const pair of cookieHeader.split(";")) {
+      const eq = pair.indexOf("=");
+      if (eq === -1 || pair.slice(0, eq).trim() !== JOURNEY_PARAM) continue;
+      const value = pair.slice(eq + 1).trim();
+      if (JOURNEY_KEY.test(value)) return { journey_id: value, journey_source: "cookie" };
+    }
+  }
+  return undefined;
+}
+
+// Cache-Control: private so a shared cache never hands one visitor's key to another. A Set-Cookie an earlier
+// middleware added is kept.
+function setJourneyKey(res, journeyId) {
+  res.setHeader(JOURNEY_HEADER, journeyId);
+  const cookie = `${JOURNEY_PARAM}=${journeyId}; ${JOURNEY_COOKIE_ATTRIBUTES}`;
+  const existing = res.getHeader("set-cookie");
+  res.setHeader("set-cookie", existing === undefined ? cookie : [].concat(existing, cookie));
+  res.setHeader("cache-control", "private");
+}
+
+function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, issueJourneyKeys = false } = {}) {
   const env = agentTrafficEnv();
   key ??= env.AGENT_TRAFFIC_KEY;
   projectId ??= env.AGENT_TRAFFIC_PROJECT_ID;
@@ -209,14 +253,17 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
     const occurredAt = new Date().toISOString();
     // Read while the request is current: the context is per request.
     const vercel = globalThis[VERCEL_CONTEXT]?.get?.();
+    const journey = journeyKeyOf(req);
+    if (issueJourneyKeys) setJourneyKey(res, journey ? journey.journey_id : `j_${randomBytes(16).toString("hex")}`);
     res.on("finish", () => {
       // An exception here would be thrown outside the request, so it is logged instead: the event is lost, the
       // server is not.
       let event;
       try {
-        event = eventOf(req, res, occurredAt);
+        event = eventOf(req, res, occurredAt, journey);
       } catch (err) {
-        console.error(`agent-traffic: event not recorded for ${req.method} ${req.originalUrl ?? req.url}: ${err.stack}`);
+        // The path only: the query string can hold a journey key, which never goes in a log.
+        console.error(`agent-traffic: event not recorded for ${req.method} ${(req.originalUrl ?? req.url ?? "").split("?")[0]}: ${err.stack}`);
         return;
       }
       if (SERVERLESS || vercel?.waitUntil) {
@@ -233,7 +280,7 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
   agentTrafficMiddleware.recordOutcome = recordOutcome;
   return agentTrafficMiddleware;
 
-  function eventOf(req, res, occurredAt) {
+  function eventOf(req, res, occurredAt, journey) {
     const accountId = accountIdOf ? accountIdOf(req, res) : undefined;
     // Only for failed responses: the text that tells one 402 from another in Fix next. Capped so a long message cannot
     // crowd a batch.
@@ -248,9 +295,10 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint } =
       accept_language: req.headers["accept-language"],
       signature_agent: req.headers["signature-agent"],
       ...signatureMaterial(req),
+      ...journey,
       properties: { status_code: res.statusCode, method: req.method, ...(typeof error === "string" && error !== "" ? { error: error.slice(0, ERROR_MAX) } : {}) },
     };
   }
 }
 
-module.exports = { eventName, agentTraffic, signatureMaterial };
+module.exports = { eventName, agentTraffic, signatureMaterial, JOURNEY_HEADER };

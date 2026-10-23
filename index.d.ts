@@ -13,6 +13,23 @@ export interface AgentTrafficOptions {
   salt?: string;
   /** Defaults to AGENT_TRAFFIC_ENDPOINT, else https://alg.katrinalaszlo.com. */
   endpoint?: string;
+  /**
+   * Off by default. When true, every response carries the visitor's journey key: the one the request sent (Track-Journey
+   * header, ?track_j= query parameter or track_j cookie), else a new "j_" + 32 hex key. It is set as the Track-Journey
+   * response header and as `Set-Cookie: track_j=<key>; Path=/; Max-Age=1209600; SameSite=Lax; Secure`, with
+   * `Cache-Control: private`. Opt-in because it sets a cookie on your responses and stops shared caches from storing them.
+   */
+  issueJourneyKeys?: boolean;
+}
+
+/** The request and response header that carries a journey key: "Track-Journey". */
+export const JOURNEY_HEADER: string;
+
+/** Fields the middleware adds to an event when the request carried a valid journey key; both or neither. */
+export interface JourneyFields {
+  /** 8 to 128 characters of A-Z, a-z, 0-9, _ and -. */
+  journey_id: string;
+  journey_source: "header" | "query" | "cookie";
 }
 
 export interface OutcomeInput {
