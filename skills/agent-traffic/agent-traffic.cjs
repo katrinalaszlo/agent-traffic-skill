@@ -190,7 +190,7 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
           byReason.set(label, (byReason.get(label) ?? 0) + 1);
         }
         for (const [label, n] of byReason) {
-          const hint = label.startsWith("unknown_field") ? ". The agent traffic host does not know this field yet: it is older than this package (0.3.0). Upgrade the host, or pin @katrinalaszlo/track to 0.2.x. https://alg.katrinalaszlo.com/docs#event-fields" : "";
+          const hint = label.startsWith("unknown_field") ? ". The agent traffic host does not know this field yet: it is older than this package (0.5.0). Upgrade the host, or pin @katrinalaszlo/track to 0.4.x. https://alg.katrinalaszlo.com/docs#event-fields" : "";
           console.error(`agent-traffic: ${n} of ${batch.length} events rejected: ${label}${hint}`);
         }
         return;
