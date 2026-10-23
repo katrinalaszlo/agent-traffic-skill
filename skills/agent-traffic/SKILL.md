@@ -1,23 +1,24 @@
 ---
 name: agent-traffic
-description: Install agent traffic into a Node/Express API, so the API owner can see which AI agents call their API, which sessions fail, and where. Use when asked to add agent traffic or agent analytics to an API.
+description: Install Track (agent traffic analytics) into a Node/Express API, so the API owner can see which AI agents call their API, which sessions fail, and where. Use when asked to add Track, agent traffic or agent analytics to an API.
 ---
 
-# Install agent traffic
+# Install Track
 
 Three steps: a key, one package and two lines of code, and a check. Done means the check in step 3 says `RESULT: PASS`. Never print the key or salt: the commands below write them to `.env` without showing them. Covers Node 18+ with Express; for another stack, stop and point the user to https://alg.katrinalaszlo.com/docs.md.
 
 ## What this installs
 
-Tell the user this before step 1. What it sends, per request, to `alg.katrinalaszlo.com` only: the route pattern, the path without domain, query or fragment (`/v1/users/123`: ids in path segments are sent as they are), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, an HMAC-SHA256 of the customer id keyed with a salt that stays in `.env`, and the journey key if the request carried one (the `Track-Journey` header, `?track_j=` in the URL, or the `track_j` cookie, in that order). For a request an agent signed (Web Bot Auth, `Signature` and `Signature-Input` headers), also those two headers, the full URL and the other headers the signature covers, so the signature can be checked; never `Authorization` or `Cookie`. Otherwise no bodies, no other headers, no IPs, no raw ids. If you add `errorOf` (step 2), also the error text it returns for failed responses. It adds the `@katrinalaszlo/track` npm package (MIT, no dependencies, source https://github.com/katrinalaszlo/agent-traffic-skill) and creates a free workspace at alg.katrinalaszlo.com.
+Tell the user this before step 1. What it sends, per request, to `alg.katrinalaszlo.com` only: the route pattern, the path without domain, query or fragment (`/v1/users/123`: ids in path segments are sent as they are), method, status code, the `User-Agent`, `Signature-Agent` and `Accept-Language` headers, the time, an HMAC-SHA256 of the customer id keyed with a salt that stays in `.env`, and the journey key if the request carried one (the `Track-Journey` header, `?track_j=` in the URL, or the `track_j` cookie, in that order). For a request an agent signed (Web Bot Auth, `Signature` and `Signature-Input` headers), also those two headers, the full URL and the other headers the signature covers, so the signature can be checked; never `Authorization` or `Cookie`. Otherwise no bodies, no other headers, no IPs, no raw ids. If you add `errorOf` (step 2), also the error text it returns for failed responses. It adds the `@katrinalaszlo/track` npm package (MIT, no dependencies, source https://github.com/katrinalaszlo/track-skill) and creates a free workspace at alg.katrinalaszlo.com.
 
 Event names exclude router mount prefixes because they can contain raw IDs (the path field does include them). A route `/orders/:orderId` mounted at `/customers/:customerId` records `orders_orderid`; identical route patterns under different mounts share a name.
 
 ## 1. Get a key
 
-From the repository root (in a monorepo, the workspace root is fine: the middleware finds `.env` in the directory the server starts from, its own folder, or any folder above). Skip the first command if `.env` already has `AGENT_TRAFFIC_KEY`.
+From the repository root (in a monorepo, the workspace root is fine: the middleware finds `.env` in the directory the server starts from, its own folder, or any folder above). Skip the `curl` if `.env` already has `AGENT_TRAFFIC_KEY`. The first command adds a final newline to a `.env` that lacks one, so each value below lands on its own line.
 
 ```sh
+if [ -s .env ] && [ -n "$(tail -c 1 .env)" ]; then echo >> .env; fi
 curl -fsS -X POST "https://alg.katrinalaszlo.com/v1/signup?format=env" -H "Content-Type: application/json" -d '{"label":"<project name>","scopes":["read","write"]}' >> .env
 grep -q "^AGENT_TRAFFIC_ACCOUNT_SALT=" .env || echo "AGENT_TRAFFIC_ACCOUNT_SALT=$(openssl rand -hex 32)" >> .env
 grep -qx ".env" .gitignore 2>/dev/null || echo ".env" >> .gitignore

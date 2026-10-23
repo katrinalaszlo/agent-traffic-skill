@@ -8,7 +8,10 @@
     "type": "git",
     "url": "git+https://github.com/katrinalaszlo/track-skill.git"
   },
-  "homepage": "https://traffic.katrinalaszlo.com/docs",
+  "homepage": "https://alg.katrinalaszlo.com/docs",
+  "bugs": {
+    "url": "https://github.com/katrinalaszlo/track-skill/issues"
+  },
   "keywords": [
     "ai-agents",
     "express",
