@@ -492,7 +492,7 @@ describe("journey keys", () => {
     assert.match(minted, /^[A-Za-z0-9_-]{8,128}$/);
     assert.equal(headers["set-cookie"], `track_j=${minted}; Path=/; Max-Age=1209600; SameSite=Lax; Secure`);
     assert.equal(headers["cache-control"], "private");
-    assert.equal("journey_id" in event, false);
+    assert.deepEqual(pick(event), { journey_id: minted, journey_source: "issued" });
     assert.notEqual((await send({ issueJourneyKeys: true })).headers[headerName], minted);
   });
 
@@ -503,6 +503,7 @@ describe("journey keys", () => {
       assert.equal(headers["set-cookie"], `track_j=${key}; Path=/; Max-Age=1209600; SameSite=Lax; Secure`);
       assert.equal(headers["cache-control"], "private");
       assert.equal(event.journey_id, key);
+      assert.notEqual(event.journey_source, "issued");
     }
   });
 

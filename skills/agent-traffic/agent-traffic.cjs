@@ -253,8 +253,9 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
     const occurredAt = new Date().toISOString();
     // Read while the request is current: the context is per request.
     const vercel = globalThis[VERCEL_CONTEXT]?.get?.();
-    const journey = journeyKeyOf(req);
-    if (issueJourneyKeys) setJourneyKey(res, journey ? journey.journey_id : `j_${randomBytes(16).toString("hex")}`);
+    let journey = journeyKeyOf(req);
+    if (issueJourneyKeys && !journey) journey = { journey_id: `j_${randomBytes(16).toString("hex")}`, journey_source: "issued" };
+    if (issueJourneyKeys) setJourneyKey(res, journey.journey_id);
     res.on("finish", () => {
       // An exception here would be thrown outside the request, so it is logged instead: the event is lost, the
       // server is not.

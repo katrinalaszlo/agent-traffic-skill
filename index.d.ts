@@ -29,7 +29,8 @@ export const JOURNEY_HEADER: string;
 export interface JourneyFields {
   /** 8 to 128 characters of A-Z, a-z, 0-9, _ and -. */
   journey_id: string;
-  journey_source: "header" | "query" | "cookie";
+  /** "issued" when issueJourneyKeys minted the key on this request's response. */
+  journey_source: "header" | "query" | "cookie" | "issued";
 }
 
 export interface OutcomeInput {
