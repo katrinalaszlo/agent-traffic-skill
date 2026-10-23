@@ -53,6 +53,11 @@ export interface AgentTrafficMiddleware {
   recordOutcome(outcome: OutcomeInput): Promise<void>;
 }
 
+/**
+ * Each event the middleware records carries `path`: the request path as the app received it (router mount prefix
+ * included, not percent-decoded), cut at the first "?" or "#", so never the domain or the query. Left out when it does
+ * not start with "/" or is longer than 2048 characters. Ids in path segments (/v1/users/123) are sent as they are.
+ */
 export function agentTraffic(options?: AgentTrafficOptions): AgentTrafficMiddleware;
 
 /** The event name for a request: its route pattern without router mount prefixes, version and "api" segments dropped, the method added for anything but GET. */

@@ -155,7 +155,7 @@ describe("agentTraffic middleware", () => {
     assert.notEqual(charge.idempotency_key, docs.idempotency_key);
   });
 
-  test("sent events group dynamic mounts by route without sending raw ids", async () => {
+  test("sent events group dynamic mounts by route; raw ids appear only in path, the query nowhere", async () => {
     sent.length = 0;
     const middleware = agentTraffic({ key: "k", projectId: "p", salt: "s", accountIdOf: (req) => req.user.id });
     for (const customerId of ["customer_123", "customer_456"]) {
@@ -169,7 +169,9 @@ describe("agentTraffic middleware", () => {
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(sent[0].batch.map((event) => event.name), ["orders_orderid", "orders_orderid"]);
     assert.deepEqual(sent[0].batch.map((event) => event.account_id), ["customer_123", "customer_456"].map((id) => createHmac("sha256", "s").update(id).digest("hex")));
-    assert.doesNotMatch(sent[0].init.body, /customer_123|customer_456|private=value/);
+    assert.deepEqual(sent[0].batch.map((event) => event.path), ["/customers/customer_123/orders/42", "/customers/customer_456/orders/42"]);
+    assert.doesNotMatch(JSON.stringify(sent[0].batch.map(({ path, ...rest }) => rest)), /customer_123|customer_456/);
+    assert.doesNotMatch(sent[0].init.body, /private=value|private/);
   });
 
   test("an accountIdOf that throws loses the event and logs it; the next request still records", async () => {
@@ -534,4 +536,101 @@ describe("journey keys", () => {
   function pick(event) {
     return { journey_id: event.journey_id, journey_source: event.journey_source };
   }
+});
+
+describe("path", () => {
+  const SIGNATURE_INPUT = 'sig1=("@method" "@target-uri");created=1;keyid="k";tag="web-bot-auth"';
+  const sent = [];
+  let original;
+  before(() => {
+    original = globalThis.fetch;
+    globalThis.fetch = async (url, init) => { sent.push(init.body); return { status: 202, json: async () => ({ accepted: 1, rejected: [] }) }; };
+  });
+  after(() => { globalThis.fetch = original; });
+
+  // One request through the middleware; resolves with the raw JSON body it sent and the parsed event.
+  async function send(req, options = {}) {
+    sent.length = 0;
+    const symbol = Symbol.for("@vercel/request-context");
+    const waited = [];
+    globalThis[symbol] = { get: () => ({ waitUntil: (p) => waited.push(p) }) };
+    try {
+      const middleware = agentTraffic({ key: "k", projectId: "p", ...options });
+      const res = new EventEmitter();
+      middleware({ method: "GET", baseUrl: "", route: { path: "/v1/users" }, headers: {}, ...req }, res, () => {});
+      res.statusCode = 200;
+      res.emit("finish");
+      await Promise.all(waited);
+    } finally {
+      delete globalThis[symbol];
+    }
+    return { body: sent[0], event: JSON.parse(sent[0])[0] };
+  }
+
+  test("a plain request sends its path, never the domain", async () => {
+    const { event } = await send({ originalUrl: "/v1/users", url: "/v1/users", headers: { host: "api.example" } });
+    assert.equal(event.path, "/v1/users");
+    assert.doesNotMatch(JSON.stringify(event), /api\.example/);
+  });
+
+  test("query and fragment are stripped: an api_key or track_j value is not in the event", async () => {
+    const url = "/v1/users?api_key=SECRET123&track_j=journeyvalue99#frag";
+    const { event, body } = await send({ originalUrl: url, url });
+    assert.equal(event.path, "/v1/users");
+    assert.doesNotMatch(body, /SECRET123|api_key|journeyvalue99|track_j|frag/);
+    assert.equal((await send({ originalUrl: "/docs#section?x=1", url: "/docs" })).event.path, "/docs");
+  });
+
+  test("a journey key read from the query reaches journey_id, never path", async () => {
+    const url = "/v1/users?track_j=journeyvalue99";
+    const { event } = await send({ originalUrl: url, url });
+    assert.equal(event.path, "/v1/users");
+    assert.equal(event.journey_id, "journeyvalue99");
+  });
+
+  test("a signed request keeps the full URL in the signature material only", async () => {
+    const url = "/v1/users?api_key=SECRET123";
+    const { event } = await send({ originalUrl: url, url, protocol: "https", headers: { host: "api.example", signature: "sig1=:AAAA:", "signature-input": SIGNATURE_INPUT } });
+    assert.equal(event.path, "/v1/users");
+    assert.equal(event.url, "https://api.example/v1/users?api_key=SECRET123");
+    const { url: signedUrl, ...rest } = event;
+    assert.doesNotMatch(JSON.stringify(rest), /SECRET123/);
+  });
+
+  test("the router mount prefix is included and the path is not percent-decoded", async () => {
+    const url = "/customers/cus_1/orders/a%20b?x=1";
+    const { event } = await send({ baseUrl: "/customers/cus_1", route: { path: "/orders/:id" }, originalUrl: url, url: "/orders/a%20b?x=1" });
+    assert.equal(event.path, "/customers/cus_1/orders/a%20b");
+    assert.equal(event.name, "orders_id");
+  });
+
+  test("a missing or odd path is left out", async () => {
+    for (const req of [{ originalUrl: undefined, url: undefined }, { originalUrl: "", url: "" }, { originalUrl: "?x=1", url: "?x=1" }, { originalUrl: "http://api.example/v1/users", url: "http://api.example/v1/users" }, { originalUrl: 42, url: 42 }]) {
+      const { event } = await send(req);
+      assert.equal("path" in event, false, JSON.stringify(req));
+    }
+  });
+
+  test("a path longer than 2048 characters is left out, not cut; 2048 exactly is sent", async () => {
+    const exact = `/${"a".repeat(2047)}`;
+    assert.equal((await send({ originalUrl: exact, url: exact })).event.path, exact);
+    const long = `/${"a".repeat(2048)}`;
+    assert.equal("path" in (await send({ originalUrl: `${long}?q=1`, url: long })).event, false);
+  });
+
+  test("the log line for a lost event has the path, never the query", async () => {
+    const errors = mock.method(console, "error", () => {});
+    try {
+      const url = "/v1/users?api_key=SECRET123#frag";
+      const middleware = agentTraffic({ key: "k", projectId: "p", salt: "s", accountIdOf: (req) => req.user.id });
+      const res = new EventEmitter();
+      middleware({ method: "GET", baseUrl: "", route: { path: "/v1/users" }, headers: {}, originalUrl: url, url }, res, () => {});
+      res.statusCode = 200;
+      res.emit("finish");
+      assert.match(errors.mock.calls[0].arguments[0], /event not recorded for GET \/v1\/users:/);
+      assert.doesNotMatch(errors.mock.calls[0].arguments[0], /SECRET123|api_key|frag/);
+    } finally {
+      errors.mock.restore();
+    }
+  });
 });

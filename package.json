@@ -1,6 +1,6 @@
 {
   "name": "@katrinalaszlo/track",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Express middleware that shows which AI agents call your API, how their sessions go, and which errors end them.",
   "license": "MIT",
   "type": "module",

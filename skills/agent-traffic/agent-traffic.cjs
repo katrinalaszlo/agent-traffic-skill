@@ -36,6 +36,7 @@ const OUTCOME_NAMES = ["signup", "key_created", "activation", "paid", "custom"];
 const FLUSH_MS = 1000;
 const RETRIES_MAX = 3;
 const ERROR_MAX = 200;
+const PATH_MAX = 2048;
 // On serverless hosts the process can freeze as soon as the response is sent, so a queued batch might never go out.
 // There each event is sent at once, and on Vercel the send is handed to waitUntil so the function stays up until it
 // is done (the request context @vercel/functions reads, without depending on it).
@@ -116,13 +117,25 @@ function signatureMaterial(req) {
   };
 }
 
+// The path the app received, mount prefix included, cut at the first ? or #: never the domain or the query, which
+// can hold an API key or a journey key. Not percent-decoded. Anything that does not start with / or is longer than
+// ingest accepts is left out rather than cut.
+function requestPath(req) {
+  const url = req.originalUrl ?? req.url;
+  if (typeof url !== "string") return undefined;
+  const path = url.split(/[?#]/)[0];
+  if (!path.startsWith("/") || path.length > PATH_MAX) return undefined;
+  return path;
+}
+
 // A journey key ties requests from one visitor together across sessions: the journey header, else ?track_j= in the URL,
 // else the track_j cookie. The first value that fits the ingest rule wins; one that does not is ignored, never sent.
 function journeyKeyOf(req) {
   const header = req.headers[JOURNEY_HEADER.toLowerCase()];
   if (typeof header === "string" && JOURNEY_KEY.test(header)) return { journey_id: header, journey_source: "header" };
 
-  const url = req.originalUrl ?? req.url ?? "";
+  const rawUrl = req.originalUrl ?? req.url;
+  const url = typeof rawUrl === "string" ? rawUrl : "";
   const queryStart = url.indexOf("?");
   if (queryStart !== -1) {
     const fromQuery = new URLSearchParams(url.slice(queryStart + 1)).getAll(JOURNEY_PARAM).find((value) => JOURNEY_KEY.test(value));
@@ -190,7 +203,7 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
           byReason.set(label, (byReason.get(label) ?? 0) + 1);
         }
         for (const [label, n] of byReason) {
-          const hint = label.startsWith("unknown_field") ? ". The agent traffic host does not know this field yet: it is older than this package (0.5.0). Upgrade the host, or pin @katrinalaszlo/track to 0.4.x. https://alg.katrinalaszlo.com/docs#event-fields" : "";
+          const hint = label.startsWith("unknown_field") ? ". The agent traffic host does not know this field yet: it is older than this package (0.6.0). Upgrade the host, or pin @katrinalaszlo/track to 0.5.x. https://alg.katrinalaszlo.com/docs#event-fields" : "";
           console.error(`agent-traffic: ${n} of ${batch.length} events rejected: ${label}${hint}`);
         }
         return;
@@ -263,8 +276,8 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
       try {
         event = eventOf(req, res, occurredAt, journey);
       } catch (err) {
-        // The path only: the query string can hold a journey key, which never goes in a log.
-        console.error(`agent-traffic: event not recorded for ${req.method} ${(req.originalUrl ?? req.url ?? "").split("?")[0]}: ${err.stack}`);
+        // The path only: the query string can hold an API key or a journey key, which never go in a log.
+        console.error(`agent-traffic: event not recorded for ${req.method} ${requestPath(req) ?? "(no path)"}: ${err.stack}`);
         return;
       }
       if (SERVERLESS || vercel?.waitUntil) {
@@ -289,6 +302,7 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
     return {
       idempotency_key: randomUUID(),
       name: eventName(req),
+      path: requestPath(req),
       occurred_at: occurredAt,
       source: "sdk",
       account_id: accountId ? hashAccountId(accountId) : undefined,
