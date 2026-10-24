@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.4 (2026-10-24)
+
+Install skill only; the middleware is unchanged. The hand-off step now ends with the claim link Track returns at signup: the agent shows it to the person, explains what claiming keeps and that the key keeps working, checks `GET /v1/claim` after they claim, and re-issues an expired link with `POST /v1/claim-link`.
+
 ## 0.7.3 (2026-10-24)
 
 - With `AGENT_TRAFFIC_ACCOUNT_SALT` set, each request's event carries `ip_hash`: HMAC-SHA256 of the client IP (`req.ip`; an IPv6 address as its /64 prefix) under a key derived from the salt and the UTC date, so it changes every UTC day. The IP and the salt never leave your server. Without the salt nothing changes, and the middleware prints one line at start saying no `ip_hash` is sent. New export `hashIp(ip, salt, occurredAt)`.
