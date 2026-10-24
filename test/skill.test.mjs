@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
-import { eventName, agentTraffic, signatureMaterial, JOURNEY_HEADER, HANDOFF_PARAM } from "../skills/agent-traffic/agent-traffic.cjs";
+import { eventName, agentTraffic, signatureMaterial, redactPath, JOURNEY_HEADER, HANDOFF_PARAM } from "../skills/agent-traffic/agent-traffic.cjs";
 
 const run = promisify(execFile);
 
@@ -63,7 +63,7 @@ describe("signatureMaterial (Web Bot Auth forwarding)", () => {
       signature: "sig1=:AAAA:",
       signature_input: INPUT,
       method: "POST",
-      url: "https://shop.example/v1/charge?x=1",
+      url: "https://shop.example/v1/charge",
       covered_headers: { "content-digest": "sha-256=:abc:" },
     });
     assert.equal(JSON.stringify(out).includes("secret"), false);
@@ -92,7 +92,7 @@ describe("signatureMaterial (Web Bot Auth forwarding)", () => {
       res.emit("finish");
       await new Promise((resolve) => setTimeout(resolve, 1100));
       assert.equal(seen[0][0].signature_input, INPUT);
-      assert.equal(seen[0][0].url, "https://shop.example/v1/charge?x=1");
+      assert.equal(seen[0][0].url, "https://shop.example/v1/charge");
       assert.equal(seen[0][0].signature_agent, 'sig1="https://claude.ai"');
       assert.equal("authorization" in (seen[0][0].covered_headers ?? {}), false);
     } finally {
@@ -313,8 +313,8 @@ describe("agent-traffic.cjs as a file in a project", () => {
     assert.equal((await node(dir, "esm.mjs")).stdout, "function true true\n");
   });
 
-  test("finds .env above its own folder when the server starts elsewhere (monorepo root vs app folder)", async () => {
-    const dir = project({});
+  test("finds .env in the app root (nearest package.json) when the server starts elsewhere", async () => {
+    const dir = project({ "package.json": "{}" });
     const { mkdirSync } = await import("node:fs");
     mkdirSync(join(dir, "apps/api/src"), { recursive: true });
     copyFileSync(join(dir, "agent-traffic.cjs"), join(dir, "apps/api/src/agent-traffic.cjs"));
@@ -517,7 +517,7 @@ describe("journey keys", () => {
     const minted = headers[headerName];
     assert.match(minted, /^j_[0-9a-f]{32}$/);
     assert.match(minted, /^[A-Za-z0-9_-]{8,128}$/);
-    assert.equal(headers["set-cookie"], `track_j=${minted}; Path=/; Max-Age=1209600; SameSite=Lax; Secure`);
+    assert.equal(headers["set-cookie"], `track_j=${minted}; Path=/; Max-Age=1209600; SameSite=Lax; Secure; HttpOnly`);
     assert.equal(headers["cache-control"], "private");
     assert.deepEqual(pick(event), { journey_id: minted, journey_source: "issued" });
     assert.notEqual((await send({ issueJourneyKeys: true })).headers[headerName], minted);
@@ -527,7 +527,7 @@ describe("journey keys", () => {
     for (const [request, key] of [[{ headers: { [headerName]: KEY_A } }, KEY_A], [{ url: `/v1/docs?track_j=${KEY_B}` }, KEY_B], [{ headers: { cookie: `track_j=${KEY_C}` } }, KEY_C]]) {
       const { headers, event } = await send({ issueJourneyKeys: true }, request);
       assert.equal(headers[headerName], key);
-      assert.equal(headers["set-cookie"], `track_j=${key}; Path=/; Max-Age=1209600; SameSite=Lax; Secure`);
+      assert.equal(headers["set-cookie"], `track_j=${key}; Path=/; Max-Age=1209600; SameSite=Lax; Secure; HttpOnly`);
       assert.equal(headers["cache-control"], "private");
       assert.equal(event.journey_id, key);
       assert.notEqual(event.journey_source, "issued");
@@ -538,7 +538,7 @@ describe("journey keys", () => {
     const res = fakeResponse();
     res.setHeader("Set-Cookie", "sid=1");
     const { headers } = await send({ issueJourneyKeys: true }, { headers: { cookie: `track_j=${KEY_C}` }, res });
-    assert.deepEqual(headers["set-cookie"], ["sid=1", `track_j=${KEY_C}; Path=/; Max-Age=1209600; SameSite=Lax; Secure`]);
+    assert.deepEqual(headers["set-cookie"], ["sid=1", `track_j=${KEY_C}; Path=/; Max-Age=1209600; SameSite=Lax; Secure; HttpOnly`]);
   });
 
   test("a journey key in the query never reaches a log", async () => {
@@ -637,9 +637,9 @@ describe("path", () => {
   });
 
   test("a path longer than 2048 characters is left out, not cut; 2048 exactly is sent", async () => {
-    const exact = `/${"a".repeat(2047)}`;
+    const exact = `/${"x".repeat(2047)}`;
     assert.equal((await send({ originalUrl: exact, url: exact })).event.path, exact);
-    const long = `/${"a".repeat(2048)}`;
+    const long = `/${"x".repeat(2048)}`;
     assert.equal("path" in (await send({ originalUrl: `${long}?q=1`, url: long })).event, false);
   });
 
@@ -771,7 +771,7 @@ describe("handoffs", () => {
     assert.equal(claim.path, "/checkout");
     assert.deepEqual([claim.journey_id, claim.journey_source], [PERSON_JOURNEY, "cookie"]);
     assert.ok(calls[0].signal, "the claim waits a bounded time");
-    assert.equal(res.headers["set-cookie"], `track_j=${AGENT_JOURNEY}; Path=/; Max-Age=1209600; SameSite=Lax; Secure`);
+    assert.equal(res.headers["set-cookie"], `track_j=${AGENT_JOURNEY}; Path=/; Max-Age=1209600; SameSite=Lax; Secure; HttpOnly`);
     assert.equal(res.headers[JOURNEY_HEADER.toLowerCase()], AGENT_JOURNEY);
     assert.deepEqual([own.name, own.path, own.journey_id, own.journey_source], ["checkout", "/checkout", AGENT_JOURNEY, "issued"]);
     assert.equal("handoff_token" in own, false);
@@ -800,7 +800,7 @@ describe("handoffs", () => {
         : accepted(batch));
       const traffic = agentTraffic({ key: "k", projectId: "p", issueJourneyKeys: true });
       const used = await visit(traffic, { url: `/checkout?track_h=${TOKEN}`, headers: { cookie: `track_j=${PERSON_JOURNEY}` } });
-      assert.equal(used.res.headers["set-cookie"], `track_j=${PERSON_JOURNEY}; Path=/; Max-Age=1209600; SameSite=Lax; Secure`);
+      assert.equal(used.res.headers["set-cookie"], `track_j=${PERSON_JOURNEY}; Path=/; Max-Age=1209600; SameSite=Lax; Secure; HttpOnly`);
       const own = eventsSent()[1];
       assert.deepEqual([own.journey_id, own.journey_source], [PERSON_JOURNEY, "cookie"]);
 
@@ -840,5 +840,255 @@ describe("handoffs", () => {
     traffic({ method: "GET", baseUrl: "", route: { path: "/checkout" }, headers: {}, url: "/checkout?track_h=nope", originalUrl: "/checkout?track_h=nope" }, fakeResponse(), () => { nextCalled = true; });
     assert.equal(nextCalled, true);
     assert.equal(calls.length, 0);
+  });
+});
+
+describe("timeouts", () => {
+  const calls = [];
+  const timeouts = [];
+  let original;
+  before(() => {
+    original = globalThis.fetch;
+    // Every call to Track hangs until its timeout signal fires, and fails the way fetch does then.
+    globalThis.fetch = (url, init) => new Promise((resolve, reject) => {
+      calls.push({ url, body: JSON.parse(init.body), signal: init.signal });
+      init.signal.addEventListener("abort", () => reject(init.signal.reason));
+    });
+    mock.method(AbortSignal, "timeout", (ms) => {
+      const controller = new AbortController();
+      timeouts.push({ ms, fire: () => controller.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError")) });
+      return controller.signal;
+    });
+    mock.timers.enable({ apis: ["setTimeout"] });
+  });
+  after(() => {
+    globalThis.fetch = original;
+    mock.timers.reset();
+    mock.restoreAll();
+  });
+  const fireAll = () => { for (const t of timeouts.splice(0)) t.fire(); };
+
+  test("handoffUrl gives Track 3 seconds, then resolves with the link unchanged and logs why", async () => {
+    const errors = mock.method(console, "error", () => {});
+    try {
+      calls.length = 0;
+      const traffic = agentTraffic({ key: "k", projectId: "p" });
+      const pending = traffic.handoffUrl("https://shop.example/checkout", { journeyId: "j_agent_journey_0001" });
+      await Promise.resolve();
+      assert.deepEqual(timeouts.map((t) => t.ms), [3000]);
+      fireAll();
+      assert.equal(await pending, "https://shop.example/checkout");
+      assert.deepEqual(errors.mock.calls.map((c) => c.arguments[0]), ["agent-traffic: handoff link sent without a token: no answer from Track within 3 seconds"]);
+    } finally {
+      errors.mock.restore();
+    }
+  });
+
+  test("recordOutcome gives Track 3 seconds, then resolves, logs, and retries with the same idempotency key", async () => {
+    const errors = mock.method(console, "error", () => {});
+    try {
+      calls.length = 0;
+      const traffic = agentTraffic({ key: "k", projectId: "p", salt: "s" });
+      const pending = traffic.recordOutcome({ accountId: "a", name: "paid", value: 1999, currency: "USD", idempotencyKey: "evt_slow" });
+      assert.deepEqual(timeouts.map((t) => t.ms), [3000]);
+      fireAll();
+      assert.equal(await pending, undefined);
+      assert.match(errors.mock.calls[0].arguments[0], /^agent-traffic: batch of 1 failed \(no answer from Track within 3 seconds\), retrying$/);
+      mock.timers.tick(2000);
+      assert.equal(calls.length, 2);
+      assert.equal(calls[1].body[0].idempotency_key, "evt_slow");
+      assert.deepEqual(timeouts.map((t) => t.ms), [3000]);
+      fireAll();
+      await new Promise((resolve) => setImmediate(resolve));
+      mock.timers.tick(4000);
+      fireAll();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.match(errors.mock.calls.at(-1).arguments[0], /dropped after 3 attempts: no answer from Track within 3 seconds/);
+    } finally {
+      errors.mock.restore();
+    }
+  });
+
+  test("an event batch gives Track 5 seconds, so a slow Track never keeps a serverless function up for minutes", async () => {
+    const errors = mock.method(console, "error", () => {});
+    const symbol = Symbol.for("@vercel/request-context");
+    const waited = [];
+    globalThis[symbol] = { get: () => ({ waitUntil: (p) => waited.push(p) }) };
+    try {
+      calls.length = 0;
+      const middleware = agentTraffic({ key: "k", projectId: "p" });
+      const res = new EventEmitter();
+      middleware({ method: "GET", baseUrl: "", route: { path: "/v1/docs" }, headers: {}, url: "/v1/docs", originalUrl: "/v1/docs" }, res, () => {});
+      res.statusCode = 200;
+      res.emit("finish");
+      assert.deepEqual(timeouts.map((t) => t.ms), [5000]);
+      fireAll();
+      await Promise.all(waited);
+      assert.match(errors.mock.calls[0].arguments[0], /no answer from Track within 5 seconds/);
+    } finally {
+      delete globalThis[symbol];
+      errors.mock.restore();
+    }
+  });
+});
+
+describe("path redaction", () => {
+  test("secret-looking segments become :token; route names and ordinary ids stay", () => {
+    const cases = [
+      ["/invite/3f1c2a9e-8b7d-4c6e-9f0a-1b2c3d4e5f60", "/invite/:token"],
+      ["/reset/Zm9vYmFyYmF6cXV4MTIz", "/reset/:token"],
+      ["/auth/magic/aB3dE6gH9jK2mN5pQ8", "/auth/magic/:token"],
+      ["/verify/abc123def456ghi789", "/verify/:token"],
+      ["/verify/a1b2c3d4e5f6a7b8", "/verify/:token"],
+      ["/verify/123456", "/verify/123456"],
+      ["/reset/QUJDREVGR0hJSktMTU5PUFE5%3D%3D", "/reset/:token"],
+      ["/v1/sessions/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U", "/v1/sessions/:token"],
+      ["/files/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "/files/:token"],
+      ["/share/Ab3De6Gh9Jk2Mn5Pq8St1V/view", "/share/:token/view"],
+      ["/v1/users/123", "/v1/users/123"],
+      ["/v1/users/550e8400-e29b-41d4-a716-446655440000", "/v1/users/550e8400-e29b-41d4-a716-446655440000"],
+      ["/customers/cus_NffrFeUfNV2Hib", "/customers/cus_NffrFeUfNV2Hib"],
+      ["/objects/507f1f77bcf86cd799439011", "/objects/507f1f77bcf86cd799439011"],
+      ["/orders/12345678901234567890", "/orders/12345678901234567890"],
+      ["/auth/callback", "/auth/callback"],
+      ["/auth/google-oauth2-callback", "/auth/google-oauth2-callback"],
+      ["/verify/email", "/verify/email"],
+      ["/account/reset-password-confirmation", "/account/reset-password-confirmation"],
+      ["/docs/2024-annual-report-final", "/docs/2024-annual-report-final"],
+      ["/v1/api-keys", "/v1/api-keys"],
+      ["/", "/"],
+    ];
+    for (const [path, expected] of cases) assert.equal(redactPath(path), expected, path);
+  });
+
+  const sent = [];
+  let original;
+  before(() => {
+    original = globalThis.fetch;
+    globalThis.fetch = async (url, init) => { sent.push(...JSON.parse(init.body)); return { status: 202, json: async () => ({ accepted: 1, rejected: [] }) }; };
+  });
+  after(() => { globalThis.fetch = original; });
+
+  async function send(options, req) {
+    sent.length = 0;
+    const symbol = Symbol.for("@vercel/request-context");
+    const waited = [];
+    globalThis[symbol] = { get: () => ({ waitUntil: (p) => waited.push(p) }) };
+    try {
+      const middleware = agentTraffic({ key: "k", projectId: "p", ...options });
+      const res = new EventEmitter();
+      res.setHeader = () => {};
+      res.getHeader = () => undefined;
+      await new Promise((resolve) => middleware({ method: "GET", baseUrl: "", headers: {}, ...req }, res, resolve));
+      res.statusCode = 200;
+      res.emit("finish");
+      await Promise.all(waited);
+    } finally {
+      delete globalThis[symbol];
+    }
+    return sent;
+  }
+
+  const TOKEN = "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5";
+
+  test("the event path is redacted by default; the event name is still the route pattern", async () => {
+    const url = `/invite/${TOKEN}?x=1`;
+    const [event] = await send({}, { route: { path: "/invite/:token" }, originalUrl: url, url });
+    assert.equal(event.path, "/invite/:token");
+    assert.equal(event.name, "invite_token");
+    assert.equal(JSON.stringify(event).includes(TOKEN), false);
+  });
+
+  test("pathOf replaces the default; undefined leaves path out; a query it returns is cut", async () => {
+    const url = `/invite/${TOKEN}`;
+    const seen = [];
+    let [event] = await send({ pathOf: (req) => { seen.push(req.originalUrl); return "/invite/:code?ref=x"; } }, { route: { path: "/invite/:token" }, originalUrl: url, url });
+    assert.equal(event.path, "/invite/:code");
+    assert.deepEqual(seen, [url]);
+    [event] = await send({ pathOf: () => undefined }, { route: { path: "/invite/:token" }, originalUrl: url, url });
+    assert.equal("path" in event, false);
+    [event] = await send({ pathOf: () => "no-slash" }, { route: { path: "/x" }, originalUrl: "/x", url: "/x" });
+    assert.equal("path" in event, false);
+  });
+
+  test("a pathOf that throws loses the event and logs the redacted path; on a handoff link the request carries on without a path", async () => {
+    const errors = mock.method(console, "error", () => {});
+    try {
+      const url = `/reset/${TOKEN}`;
+      assert.deepEqual(await send({ pathOf: () => { throw new Error("boom"); } }, { route: { path: "/reset/:token" }, originalUrl: url, url }), []);
+      assert.match(errors.mock.calls[0].arguments[0], /^agent-traffic: event not recorded for GET \/reset\/:token: Error: boom/);
+      assert.equal(errors.mock.calls[0].arguments[0].includes(TOKEN), false);
+
+      const handoff = `/checkout?track_h=h_${"T".repeat(43)}`;
+      const events = await send({ pathOf: () => { throw new Error("boom"); } }, { route: { path: "/checkout" }, originalUrl: handoff, url: handoff });
+      assert.equal(events[0].name, "handoff_opened");
+      assert.equal("path" in events[0], false);
+      assert.ok(errors.mock.calls.some((c) => c.arguments[0] === "agent-traffic: pathOf threw, handoff_opened sent without a path: boom"));
+    } finally {
+      errors.mock.restore();
+    }
+  });
+});
+
+describe("signed request URL and the query", () => {
+  const signedWith = (input, originalUrl = "/v1/charge?api_key=SECRET#frag") => ({
+    method: "GET", protocol: "https", originalUrl, url: originalUrl,
+    headers: { host: "shop.example", signature: "sig1=:AAAA:", "signature-input": input },
+  });
+
+  test("the query is left out unless the signature covers it", () => {
+    assert.equal(signatureMaterial(signedWith('sig1=("@method" "@authority" "@path");tag="web-bot-auth"')).url, "https://shop.example/v1/charge");
+    assert.equal(signatureMaterial(signedWith('sig1=("@authority");tag="web-bot-auth"', "/v1/charge")).url, "https://shop.example/v1/charge");
+  });
+
+  test("@query, @query-param, @target-uri and @request-target keep the query; the fragment never goes", () => {
+    for (const component of ['"@query"', '"@query-param";name="api_key"', '"@target-uri"', '"@request-target"']) {
+      assert.equal(signatureMaterial(signedWith(`sig1=("@authority" ${component});tag="web-bot-auth"`)).url, "https://shop.example/v1/charge?api_key=SECRET", component);
+    }
+    assert.equal(signatureMaterial(signedWith('sig1=("@authority");tag="a", sig2=("@target-uri");tag="b"')).url, "https://shop.example/v1/charge?api_key=SECRET");
+  });
+});
+
+describe("endpoint and .env hardening", () => {
+  const SOURCE = new URL("../skills/agent-traffic/agent-traffic.cjs", import.meta.url).pathname;
+  const dirs = [];
+  after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
+  const tempDir = () => { const dir = mkdtempSync(join(tmpdir(), "agent-traffic-hard-")); dirs.push(dir); return dir; };
+  const node = (cwd, file, env = {}) => run(process.execPath, [file], { cwd, env: { PATH: process.env.PATH, ...env } });
+
+  test("a plain http endpoint warns once per process; https and localhost do not", async () => {
+    const dir = tempDir();
+    copyFileSync(SOURCE, join(dir, "agent-traffic.cjs"));
+    writeFileSync(join(dir, "probe.cjs"), [
+      'const { agentTraffic } = require("./agent-traffic.cjs");',
+      'for (const endpoint of process.argv.slice(2)) agentTraffic({ key: "k", endpoint });',
+    ].join("\n"));
+    const stderr = async (...endpoints) => (await run(process.execPath, ["probe.cjs", ...endpoints], { cwd: dir, env: { PATH: process.env.PATH } })).stderr;
+    assert.equal(await stderr("http://track.example", "http://track.example:8080/x"), "agent-traffic: the endpoint http://track.example is plain http, not https: the key and every event travel unencrypted. Use https outside local development.\n");
+    assert.equal(await stderr("https://track.example", "http://localhost:8787", "http://127.0.0.1", "http://[::1]:3000", "http://api.localhost"), "");
+  });
+
+  test("a .env above the app root is not read", async () => {
+    const dir = tempDir();
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(join(dir, "app"), { recursive: true });
+    writeFileSync(join(dir, ".env"), "AGENT_TRAFFIC_KEY=ark_stray\n");
+    writeFileSync(join(dir, "app/package.json"), "{}");
+    copyFileSync(SOURCE, join(dir, "app/agent-traffic.cjs"));
+    writeFileSync(join(dir, "app/probe.cjs"), 'const { agentTraffic } = require("./agent-traffic.cjs"); agentTraffic();');
+    const err = await node(tempDir(), join(dir, "app/probe.cjs")).catch((e) => e);
+    assert.match(err.stderr, /needs AGENT_TRAFFIC_KEY/);
+  });
+
+  test("installed under node_modules, the app root is the folder that holds node_modules", async () => {
+    const dir = tempDir();
+    const { mkdirSync } = await import("node:fs");
+    const pkg = join(dir, "app/node_modules/@katrinalaszlo/track/skills/agent-traffic");
+    mkdirSync(pkg, { recursive: true });
+    copyFileSync(SOURCE, join(pkg, "agent-traffic.cjs"));
+    writeFileSync(join(dir, "app/node_modules/@katrinalaszlo/track/package.json"), "{}");
+    writeFileSync(join(dir, "app/.env"), "AGENT_TRAFFIC_KEY=ark_app\n");
+    writeFileSync(join(dir, "app/probe.cjs"), `const { agentTraffic } = require(${JSON.stringify(join(pkg, "agent-traffic.cjs"))}); console.log(typeof agentTraffic());`);
+    assert.equal((await node(tempDir(), join(dir, "app/probe.cjs"))).stdout, "function\n");
   });
 });

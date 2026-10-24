@@ -13,9 +13,11 @@
 // error text for a failed response (status 400 and above), such as an error code your handler put in res.locals, so
 // two errors with the same status show as different rows in Fix next. AGENT_TRAFFIC_KEY (required),
 // AGENT_TRAFFIC_ACCOUNT_SALT and AGENT_TRAFFIC_PROJECT_ID (optional: without it the key's own project is used) come from
-// the environment, or from a .env in the working directory, this file's folder or any folder above it, when the
-// environment lacks them; only AGENT_TRAFFIC_ lines are read, nothing else in .env is touched. issueJourneyKeys, optional and off by default, gives each visitor a journey key
-// on the response (a header and a track_j cookie) so its later requests join one journey.
+// the environment, or from a .env in the working directory or the app root (see appRoot), when the environment lacks
+// them; only AGENT_TRAFFIC_ lines are read, nothing else in .env is touched. pathOf, optional, returns the path to send
+// for a request instead of the default (the request path with secret-looking segments replaced by :token).
+// issueJourneyKeys, optional and off by default, gives each visitor a journey key on the response (a header and an
+// HttpOnly track_j cookie) so its later requests join one journey.
 //
 // Handoffs: when an agent sends a person a link to finish (approve a payment, verify an email), add a one-time token so
 // the person's actions count toward the agent's journey:
@@ -28,21 +30,27 @@
 // and retried with the same keys.
 const { createHmac, randomBytes, randomUUID } = require("node:crypto");
 const { existsSync, readFileSync } = require("node:fs");
-const { dirname, join } = require("node:path");
+const { dirname, join, sep } = require("node:path");
 
 // The request and response header that carries a journey key.
 const JOURNEY_HEADER = "Track-Journey";
 // The cookie name and the query parameter name.
 const JOURNEY_PARAM = "track_j";
 const JOURNEY_KEY = /^[A-Za-z0-9_-]{8,128}$/;
-// 14 days. Secure so the key never travels over plain http; Lax so it comes along when a person follows a link in.
-const JOURNEY_COOKIE_ATTRIBUTES = "Path=/; Max-Age=1209600; SameSite=Lax; Secure";
+// 14 days. Secure so the key never travels over plain http; Lax so it comes along when a person follows a link in;
+// HttpOnly because only the server reads it, so a script on the page cannot.
+const JOURNEY_COOKIE_ATTRIBUTES = "Path=/; Max-Age=1209600; SameSite=Lax; Secure; HttpOnly";
 // The query parameter a handoff link carries, and the token shape Track mints. A token is a secret in transit: it goes
 // to Track only, never into a log or an error message.
 const HANDOFF_PARAM = "track_h";
 const HANDOFF_TOKEN = /^h_[A-Za-z0-9_-]{32,64}$/;
 // How long a request with ?track_h= waits for Track before it carries on unlinked.
 const HANDOFF_WAIT_MS = 2000;
+// How long each call to Track may take before it is given up: a slow Track never holds a customer's request, payment
+// webhook or serverless function for longer. A batch has the most to carry, so it gets the most time.
+const SEND_TIMEOUT_MS = 5000;
+const OUTCOME_TIMEOUT_MS = 3000;
+const HANDOFF_URL_TIMEOUT_MS = 3000;
 
 const BATCH_MAX = 25;
 const OUTCOME_NAMES = ["signup", "key_created", "activation", "paid", "custom"];
@@ -72,14 +80,22 @@ function eventName(req) {
   return (name === "" ? "root" : name).slice(0, 64).replace(/_+$/, "");
 }
 
-// The .env holding AGENT_TRAFFIC_KEY: in the working directory, else in this file's folder or the nearest one above it, so
-// it can sit at an app's root or a monorepo's root whichever directory the server starts from.
-function envFile() {
-  const candidates = [join(process.cwd(), ".env")];
+// The app root: the folder whose node_modules holds this package (the first node_modules in this file's path, so a
+// pnpm store or a hoisted monorepo install gives the folder that holds that node_modules). For a copy of this file
+// inside an app, the nearest folder at or above it with a package.json; with none, this file's folder.
+function appRoot() {
+  const at = __dirname.indexOf(`${sep}node_modules${sep}`);
+  if (at !== -1) return __dirname.slice(0, at);
   for (let dir = __dirname; ; dir = dirname(dir)) {
-    candidates.push(join(dir, ".env"));
-    if (dirname(dir) === dir) break;
+    if (existsSync(join(dir, "package.json"))) return dir;
+    if (dirname(dir) === dir) return __dirname;
   }
+}
+
+// The .env holding AGENT_TRAFFIC_KEY: in the working directory, else in the app root. No folder above those is read,
+// so a stray .env higher up (a home folder, a parent project) is never picked up.
+function envFile() {
+  const candidates = [join(process.cwd(), ".env"), join(appRoot(), ".env")];
   return candidates.find((file) => existsSync(file) && /^AGENT_TRAFFIC_KEY=/m.test(readFileSync(file, "utf8")));
 }
 
@@ -94,9 +110,20 @@ function agentTrafficEnv() {
   return values;
 }
 
+// An endpoint on plain http sends the key and every event unencrypted. Said once per process; localhost is exempt.
+let warnedPlainHttp = false;
+function warnIfPlainHttp(endpoint) {
+  const host = /^http:\/\/(\[[^\]]*\]|[^/:?#]*)/i.exec(endpoint)?.[1]?.toLowerCase();
+  if (host === undefined || warnedPlainHttp) return;
+  if (["localhost", "127.0.0.1", "[::1]"].includes(host) || host.endsWith(".localhost")) return;
+  warnedPlainHttp = true;
+  console.error(`agent-traffic: the endpoint http://${host} is plain http, not https: the key and every event travel unencrypted. Use https outside local development.`);
+}
+
 // Web Bot Auth: when an agent signed its request (Signature and Signature-Input headers), the event carries what ingest
 // needs to check the signature: those two headers, the method and absolute URL, and only the other headers the
 // signature covers. Never a credential header, whatever the signer covered. An unsigned request adds nothing.
+// The URL keeps its query only when the signature covers it: without that, the query (which can hold an API key) stays home.
 const SIGNATURE_HEADERS = ["signature", "signature-input", "signature-agent"];
 const FORBIDDEN_COVERED = ["authorization", "proxy-authorization", "cookie", "set-cookie"];
 
@@ -107,6 +134,15 @@ function coveredHeaderNames(signatureInput) {
     for (const item of group[1].matchAll(/"([^"]+)"/g)) if (!item[1].startsWith("@")) names.push(item[1].toLowerCase());
   }
   return names;
+}
+
+// Derived components that include the query. With any of them signed, the signature cannot be checked without it.
+const QUERY_COMPONENTS = ["@query", "@query-param", "@target-uri", "@request-target"];
+function coversQuery(signatureInput) {
+  for (const group of signatureInput.matchAll(/\(([^)]*)\)/g)) {
+    for (const item of group[1].matchAll(/"([^"]+)"/g)) if (QUERY_COMPONENTS.includes(item[1].toLowerCase())) return true;
+  }
+  return false;
 }
 
 function signatureMaterial(req) {
@@ -120,7 +156,9 @@ function signatureMaterial(req) {
   }
   // req.protocol honours Express's trust proxy setting, so behind a proxy the URL is the one the agent signed.
   const host = req.headers.host;
-  const url = typeof host === "string" && host !== "" ? `${req.protocol ?? "https"}://${host}${req.originalUrl ?? req.url ?? "/"}` : undefined;
+  const target = String(req.originalUrl ?? req.url ?? "/").split("#")[0];
+  const pathAndQuery = coversQuery(signatureInput) ? target : target.split("?")[0];
+  const url = typeof host === "string" && host !== "" ? `${req.protocol ?? "https"}://${host}${pathAndQuery}` : undefined;
   return {
     signature,
     signature_input: signatureInput,
@@ -139,6 +177,37 @@ function requestPath(req) {
   const path = url.split(/[?#]/)[0];
   if (!path.startsWith("/") || path.length > PATH_MAX) return undefined;
   return path;
+}
+
+// Route words after which the next segment is a link token: /invite/<token>, /reset/<token>, /auth/magic/<token>.
+const TOKEN_ROUTE = /^(auth|invite|invites|invitation|invitations|magic|magic-link|reset|reset-password|password-reset|token|tokens|verify|verify-email|verification|confirm|activate)$/i;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// A segment that looks like a secret rather than a route name or an ordinary id: a JWT; 32 or more hex characters (a
+// shorter hex string, such as a 24 character Mongo ObjectId, is an id); or 20 or more base64url characters with a
+// letter and a digit that are mixed case or have no - or _ (so reset-password-confirmation and oauth2-callback stay).
+// Right after a TOKEN_ROUTE word the bar is lower: a uuid, 16 or more hex, or 16 or more such characters. Base64
+// padding (= or %3D) is ignored.
+function looksLikeSecret(segment, afterTokenRoute) {
+  if (afterTokenRoute && UUID.test(segment)) return true;
+  const s = segment.replace(/(=|%3D)+$/i, "");
+  if (/^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/.test(s)) return true;
+  if (/^[0-9a-f]+$/i.test(s)) return s.length >= (afterTokenRoute ? 16 : 32);
+  if (s.length < (afterTokenRoute ? 16 : 20) || !/^[A-Za-z0-9_-]+$/.test(s) || !/[0-9]/.test(s) || !/[A-Za-z]/.test(s)) return false;
+  return (/[A-Z]/.test(s) && /[a-z]/.test(s)) || !/[-_]/.test(s);
+}
+
+// The path with each secret-looking segment replaced by :token. Numbers, uuids outside a token route, short prefixed
+// ids (cus_123) and route names are kept.
+function redactPath(path) {
+  const segments = path.split("/");
+  return segments.map((segment, i) => (looksLikeSecret(segment, i > 0 && TOKEN_ROUTE.test(segments[i - 1])) ? ":token" : segment)).join("/");
+}
+
+// The default path: requestPath with secret-looking segments redacted.
+function redactedPath(req) {
+  const path = requestPath(req);
+  return path === undefined ? undefined : redactPath(path);
 }
 
 // A journey key ties requests from one visitor together across sessions: the journey header, else ?track_j= in the URL,
@@ -186,7 +255,7 @@ function setJourneyKey(res, journeyId) {
   res.setHeader("cache-control", "private");
 }
 
-function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, issueJourneyKeys = false } = {}) {
+function agentTraffic({ accountIdOf, errorOf, pathOf, key, projectId, salt, endpoint, issueJourneyKeys = false } = {}) {
   const env = agentTrafficEnv();
   key ??= env.AGENT_TRAFFIC_KEY;
   projectId ??= env.AGENT_TRAFFIC_PROJECT_ID;
@@ -194,6 +263,7 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
   endpoint ??= env.AGENT_TRAFFIC_ENDPOINT ?? "https://alg.katrinalaszlo.com";
   if (!key) throw new Error("agentTraffic needs AGENT_TRAFFIC_KEY, in the environment or in .env. Run `npx agent-led-growth connect` to get one.");
   if (accountIdOf && !salt) throw new Error("agentTraffic needs AGENT_TRAFFIC_ACCOUNT_SALT, in the environment or in .env, to hash what accountIdOf returns.");
+  warnIfPlainHttp(endpoint);
   const projectQuery = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
   const url = `${endpoint}/v1/events${projectQuery}`;
   const handoffsUrl = `${endpoint}/v1/handoffs${projectQuery}`;
@@ -203,13 +273,16 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
   let timer = null;
   const warned = new Set();
 
-  async function send(batch, attempt) {
+  // A batch Track does not answer within timeoutMs counts as failed and is retried like a 5xx, with the same keys, so
+  // a batch Track did store is counted once.
+  async function send(batch, attempt, timeoutMs = SEND_TIMEOUT_MS) {
     let failure = null;
     try {
       const res = await fetch(url, {
         method: "POST",
         headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
         body: JSON.stringify(batch),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       const body = await res.json();
       if (res.status === 202) {
@@ -241,14 +314,14 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
         return;
       }
     } catch (err) {
-      failure = err.message;
+      failure = err.name === "TimeoutError" ? `no answer from Track within ${timeoutMs / 1000} seconds` : err.message;
     }
     if (attempt >= RETRIES_MAX) {
       console.error(`agent-traffic: batch of ${batch.length} dropped after ${attempt} attempts: ${failure}`);
       return;
     }
     console.error(`agent-traffic: batch of ${batch.length} failed (${failure}), retrying`);
-    setTimeout(() => send(batch, attempt + 1), FLUSH_MS * 2 ** attempt).unref();
+    setTimeout(() => send(batch, attempt + 1, timeoutMs), FLUSH_MS * 2 ** attempt).unref();
   }
 
   function flush() {
@@ -259,7 +332,8 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
   const hashAccountId = (accountId) => createHmac("sha256", salt).update(String(accountId)).digest("hex");
 
   // An outcome is sent at once, not batched: there are few of them and each one is money or a signup. Returns a
-  // promise that settles when the send has finished (sent, or logged and dropped); nothing it does can throw into
+  // promise that settles when the send has finished (sent, or logged and dropped), within 3 seconds: when Track does
+  // not answer in time it is logged and retried in the background with the same key. Nothing it does can throw into
   // your handler after validation. Bad input throws synchronously, at your call site, with the field named: that is
   // your bug to see now, not a rejection to find in a log later.
   function recordOutcome({ accountId, name, value, currency, idempotencyKey, occurredAt } = {}) {
@@ -283,7 +357,7 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
       properties: {},
     };
     const vercel = globalThis[VERCEL_CONTEXT]?.get?.();
-    const sending = send([event], 1);
+    const sending = send([event], 1, OUTCOME_TIMEOUT_MS);
     vercel?.waitUntil?.(sending);
     return sending;
   }
@@ -294,8 +368,9 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
   }
 
   // Resolves with link plus ?track_h=<token> for the agent's journey: journeyId, else the journey of req. Bad input
-  // throws synchronously. When Track cannot mint a token the failure is logged and the promise resolves with link
-  // unchanged, so the person still gets a working link; it just will not count toward the agent's journey.
+  // throws synchronously. When Track cannot mint a token, or does not answer within 3 seconds, the failure is logged
+  // and the promise resolves with link unchanged, so the person still gets a working link; it just will not count
+  // toward the agent's journey.
   function handoffUrl(link, { req, journeyId } = {}) {
     let target;
     try {
@@ -311,6 +386,7 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
           method: "POST",
           headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
           body: JSON.stringify({ journey_id: journey }),
+          signal: AbortSignal.timeout(HANDOFF_URL_TIMEOUT_MS),
         });
         const body = await res.json();
         if (res.status !== 201) {
@@ -320,7 +396,8 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
         target.searchParams.set(HANDOFF_PARAM, body.token);
         return target.toString();
       } catch (err) {
-        console.error(`agent-traffic: handoff link sent without a token: ${err.message}`);
+        const reason = err.name === "TimeoutError" ? `no answer from Track within ${HANDOFF_URL_TIMEOUT_MS / 1000} seconds` : err.message;
+        console.error(`agent-traffic: handoff link sent without a token: ${reason}`);
         return link;
       }
     })();
@@ -379,8 +456,9 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
         try {
           event = eventOf(req, res, occurredAt, journey);
         } catch (err) {
-          // The path only: the query string can hold an API key, a journey key or a handoff token, which never go in a log.
-          console.error(`agent-traffic: event not recorded for ${req.method} ${requestPath(req) ?? "(no path)"}: ${err.stack}`);
+          // The redacted path only: the query string can hold an API key, a journey key or a handoff token, and a path
+          // segment an invite or reset token, which never go in a log.
+          console.error(`agent-traffic: event not recorded for ${req.method} ${redactedPath(req) ?? "(no path)"}: ${err.stack}`);
           return;
         }
         if (SERVERLESS || vercel?.waitUntil) {
@@ -400,6 +478,17 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
   agentTrafficMiddleware.journeyIdOf = journeyIdOf;
   return agentTrafficMiddleware;
 
+  // The path to send: what pathOf returns, else the redacted request path. Either way cut at ? or #, and left out
+  // when it does not start with / or is longer than 2048 characters.
+  function pathFor(req) {
+    if (!pathOf) return redactedPath(req);
+    const custom = pathOf(req);
+    if (typeof custom !== "string") return undefined;
+    const path = custom.split(/[?#]/)[0];
+    if (!path.startsWith("/") || path.length > PATH_MAX) return undefined;
+    return path;
+  }
+
   function eventOf(req, res, occurredAt, journey) {
     const accountId = accountIdOf ? accountIdOf(req, res) : undefined;
     // Only for failed responses: the text that tells one 402 from another in Fix next. Capped so a long message cannot
@@ -408,7 +497,7 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
     return {
       idempotency_key: randomUUID(),
       name: eventName(req),
-      path: requestPath(req),
+      path: pathFor(req),
       occurred_at: occurredAt,
       source: "sdk",
       account_id: accountId ? hashAccountId(accountId) : undefined,
@@ -423,11 +512,18 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
 
   // The event that carries a handoff token, sent before the response, so it has no status code and no account yet:
   // the person's sign-in comes on their later requests.
+  // It runs before your routes, so a pathOf that throws must not fail the request: the event goes without a path.
   function handoffEventOf(req, occurredAt, journey, handoffToken) {
+    let path;
+    try {
+      path = pathFor(req);
+    } catch (err) {
+      console.error(`agent-traffic: pathOf threw, handoff_opened sent without a path: ${err.message}`);
+    }
     return {
       idempotency_key: randomUUID(),
       name: "handoff_opened",
-      path: requestPath(req),
+      path,
       occurred_at: occurredAt,
       source: "sdk",
       user_agent: req.headers["user-agent"],
@@ -440,4 +536,4 @@ function agentTraffic({ accountIdOf, errorOf, key, projectId, salt, endpoint, is
   }
 }
 
-module.exports = { eventName, agentTraffic, signatureMaterial, JOURNEY_HEADER, HANDOFF_PARAM };
+module.exports = { eventName, agentTraffic, signatureMaterial, redactPath, JOURNEY_HEADER, HANDOFF_PARAM };
