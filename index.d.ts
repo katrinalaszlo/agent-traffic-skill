@@ -5,18 +5,24 @@ export interface AgentTrafficOptions {
   accountIdOf?: (req: any, res: any) => string | number | null | undefined;
   /** Error text for a failed response (status 400 and above), or undefined. Sent as properties.error, up to 200 characters, so two errors with the same status show separately in Fix next. */
   errorOf?: (req: any, res: any) => string | null | undefined;
-  /** Defaults to AGENT_TRAFFIC_KEY from the environment or .env. */
+  /**
+   * The path to send for this request, instead of the default (the request path with secret-looking segments, such as
+   * the token in /invite/<token>, replaced by ":token"). Cut at "?" or "#"; left out unless it starts with "/" and fits
+   * 2048 characters. Return undefined to leave path out.
+   */
+  pathOf?: (req: any) => string | null | undefined;
+  /** Defaults to AGENT_TRAFFIC_KEY from the environment or .env (the working directory's, else the app root's). */
   key?: string;
   /** Defaults to AGENT_TRAFFIC_PROJECT_ID from the environment or .env. Optional: without it, events go to the key's own project. */
   projectId?: string;
   /** Defaults to AGENT_TRAFFIC_ACCOUNT_SALT from the environment or .env. Required when accountIdOf is set. */
   salt?: string;
-  /** Defaults to AGENT_TRAFFIC_ENDPOINT, else https://alg.katrinalaszlo.com. */
+  /** Defaults to AGENT_TRAFFIC_ENDPOINT, else https://alg.katrinalaszlo.com. A plain http:// endpoint other than localhost logs one warning per process. */
   endpoint?: string;
   /**
    * Off by default. When true, every response carries the visitor's journey key: the one the request sent (Track-Journey
    * header, ?track_j= query parameter or track_j cookie), else a new "j_" + 32 hex key. It is set as the Track-Journey
-   * response header and as `Set-Cookie: track_j=<key>; Path=/; Max-Age=1209600; SameSite=Lax; Secure`, with
+   * response header and as `Set-Cookie: track_j=<key>; Path=/; Max-Age=1209600; SameSite=Lax; Secure; HttpOnly`, with
    * `Cache-Control: private`. Opt-in because it sets a cookie on your responses and stops shared caches from storing them.
    */
   issueJourneyKeys?: boolean;
@@ -59,12 +65,15 @@ export interface OutcomeInput {
 
 export interface AgentTrafficMiddleware {
   (req: any, res: any, next: (err?: unknown) => void): void;
-  /** Sends one outcome at once. Throws synchronously on bad input; the returned promise settles when the send finished. */
+  /**
+   * Sends one outcome at once. Throws synchronously on bad input; the returned promise settles when the send finished,
+   * within 3 seconds: when Track does not answer in time it logs, resolves, and retries in the background with the same key.
+   */
   recordOutcome(outcome: OutcomeInput): Promise<void>;
   /**
    * Resolves with `link` plus `?track_h=<token>`, a one-time token (24 hours) that puts the person who opens the link
    * on the agent's journey. Throws synchronously when link is not absolute or there is no valid journey key. When Track
-   * cannot mint a token, logs it and resolves with `link` unchanged.
+   * cannot mint a token, or does not answer within 3 seconds, logs it and resolves with `link` unchanged.
    */
   handoffUrl(link: string, options: HandoffOptions): Promise<string>;
   /** The journey key the middleware recorded this request with (the agent's, when a handoff link linked it), or undefined. */
@@ -74,10 +83,15 @@ export interface AgentTrafficMiddleware {
 /**
  * Each event the middleware records carries `path`: the request path as the app received it (router mount prefix
  * included, not percent-decoded), cut at the first "?" or "#", so never the domain or the query. Left out when it does
- * not start with "/" or is longer than 2048 characters. Ids in path segments (/v1/users/123) are sent as they are.
+ * not start with "/" or is longer than 2048 characters. Ordinary ids in path segments (/v1/users/123) are sent as they
+ * are; segments that look like secrets (/invite/<token>, /reset/<token>, a JWT, long random strings) as ":token".
+ * Pass pathOf to choose the path yourself.
  * A request with a well-formed ?track_h= waits up to 2 seconds for Track to link it, before your routes run.
  */
 export function agentTraffic(options?: AgentTrafficOptions): AgentTrafficMiddleware;
 
 /** The event name for a request: its route pattern without router mount prefixes, version and "api" segments dropped, the method added for anything but GET. */
 export function eventName(req: any): string;
+
+/** The default path redaction: each segment that looks like a secret replaced by ":token". "/invite/<token>" -> "/invite/:token". */
+export function redactPath(path: string): string;
