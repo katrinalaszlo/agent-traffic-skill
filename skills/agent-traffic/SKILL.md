@@ -15,11 +15,11 @@ Event names exclude router mount prefixes because they can contain raw IDs (the 
 
 ## 1. Get a key
 
-From the directory the server starts in, or the app root (the folder whose `node_modules` will hold the package): the middleware reads `.env` from those two places only, never from a folder above them. In a monorepo where the package is installed in the API's workspace and the server starts there, run this in the API's folder. Skip the `curl` if `.env` already has `AGENT_TRAFFIC_KEY`. The first command adds a final newline to a `.env` that lacks one, so each value below lands on its own line.
+From the directory the server starts in, or the app root (the folder whose `node_modules` will hold the package): the middleware reads `.env` from those two places only, never from a folder above them. In a monorepo where the package is installed in the API's workspace and the server starts there, run this in the API's folder. Skip the `curl` if `.env` already has `AGENT_TRAFFIC_KEY`. If a `curl` in this skill prints a JSON error, do what its `next_step` says. The first command adds a final newline to a `.env` that lacks one, so each value below lands on its own line.
 
 ```sh
 if [ -s .env ] && [ -n "$(tail -c 1 .env)" ]; then echo >> .env; fi
-curl -fsS -X POST "https://alg.katrinalaszlo.com/v1/signup?format=env" -H "Content-Type: application/json" -d '{"label":"<project name>","scopes":["read","write"]}' >> .env
+curl -sS --fail-with-body -X POST "https://alg.katrinalaszlo.com/v1/signup?format=env" -H "Content-Type: application/json" -d '{"label":"<project name>","scopes":["read","write"]}' -o .track-signup && cat .track-signup >> .env || cat .track-signup; rm -f .track-signup
 grep -q "^AGENT_TRAFFIC_ACCOUNT_SALT=" .env || echo "AGENT_TRAFFIC_ACCOUNT_SALT=$(openssl rand -hex 32)" >> .env
 grep -qx ".env" .gitignore 2>/dev/null || echo ".env" >> .gitignore
 ```
@@ -58,11 +58,11 @@ curl -H "User-Agent: Claude-User (claude-code/2.1)" -H 'Signature-Agent: "https:
 Wait 2 seconds, then:
 
 ```sh
-curl -fsS -X POST https://alg.katrinalaszlo.com/v1/install-check -H "Authorization: Bearer $(sed -n 's/^AGENT_TRAFFIC_KEY=//p' .env)"
+curl -sS --fail-with-body -X POST https://alg.katrinalaszlo.com/v1/install-check -H "Authorization: Bearer $(sed -n 's/^AGENT_TRAFFIC_KEY=//p' .env)"
 ```
 
 On a `FAIL` line, fix what it says and repeat step 3. `WARN` lines are for the user.
 
 ## Hand off
 
-End by showing the user the claim link: the last line of the install check (`Claim this workspace: <url> (link valid until <date>)`), or `grep '^# Claim this workspace' .env`. Tell them: open it, sign in or create an account, and choose "Add to my account" to keep this workspace, its projects and everything you did in their Track account; the key in `.env` keeps working after the claim and nothing changes for the server; the link works 7 days, and unclaimed nothing is deleted (they can also sign in at https://alg.katrinalaszlo.com/login with `AGENT_TRAFFIC_KEY`). If they say they claimed it, run `curl -fsS https://alg.katrinalaszlo.com/v1/claim -H "Authorization: Bearer $(sed -n 's/^AGENT_TRAFFIC_KEY=//p' .env)"` and confirm `"claimed": true`; if the link expired, `curl -fsS -X POST https://alg.katrinalaszlo.com/v1/claim-link -H "Authorization: Bearer $(sed -n 's/^AGENT_TRAFFIC_KEY=//p' .env)"` returns a new `claim_url`. Also tell them which field `accountIdOf` returns; that production needs `AGENT_TRAFFIC_KEY` and `AGENT_TRAFFIC_ACCOUNT_SALT` from `.env`, with the same salt everywhere (`AGENT_TRAFFIC_PROJECT_ID` is optional: the key already names its project); and that on serverless hosts (Vercel functions, Lambda) events can be lost when the process freezes after the response.
+End by showing the user the claim link: the last line of the install check (`Claim this workspace: <url> (link valid until <date> <time> UTC)`), or `grep '^# Claim this workspace' .env`. Tell them: open it, sign in or create an account, and choose "Add to my account" to keep this workspace, its projects and everything you did in their Track account; the key in `.env` keeps working after the claim and nothing changes for the server; the link works 7 days, and unclaimed nothing is deleted (they can also sign in at https://alg.katrinalaszlo.com/login with `AGENT_TRAFFIC_KEY`). If they say they claimed it, run `curl -sS --fail-with-body https://alg.katrinalaszlo.com/v1/claim -H "Authorization: Bearer $(sed -n 's/^AGENT_TRAFFIC_KEY=//p' .env)"` and confirm `"claimed": true`; if the link expired, `curl -sS --fail-with-body -X POST https://alg.katrinalaszlo.com/v1/claim-link -H "Authorization: Bearer $(sed -n 's/^AGENT_TRAFFIC_KEY=//p' .env)"` returns a new `claim_url`. Also tell them which field `accountIdOf` returns; that production needs `AGENT_TRAFFIC_KEY` and `AGENT_TRAFFIC_ACCOUNT_SALT` from `.env`, with the same salt everywhere (`AGENT_TRAFFIC_PROJECT_ID` is optional: the key already names its project); and that on serverless hosts (Vercel functions, Lambda) events can be lost when the process freezes after the response.

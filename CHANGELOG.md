@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.5 (2026-10-24)
+
+Install skill only; the middleware is unchanged. Every curl in the skill now prints Track's JSON error instead of hiding it (`--fail-with-body` instead of `-f`), so the agent sees `next_step` and `resolved_by`; the signup command writes to a temp file first so an error never lands in `.env`. The claim link line shows its expiry time in UTC.
+
 ## 0.7.4 (2026-10-24)
 
 Install skill only; the middleware is unchanged. The hand-off step now ends with the claim link Track returns at signup: the agent shows it to the person, explains what claiming keeps and that the key keeps working, checks `GET /v1/claim` after they claim, and re-issues an expired link with `POST /v1/claim-link`.
