@@ -7,9 +7,11 @@ import { mkdtempSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
-import { eventName, agentTraffic, signatureMaterial, redactPath, JOURNEY_HEADER, HANDOFF_PARAM } from "../skills/agent-traffic/agent-traffic.cjs";
+import { eventName, agentTraffic, signatureMaterial, redactPath, hashIp, JOURNEY_HEADER, HANDOFF_PARAM } from "../skills/agent-traffic/agent-traffic.cjs";
 
 const run = promisify(execFile);
+// Without a salt the middleware prints one line saying no ip_hash is sent; tests about other things drop it.
+const withoutSaltNote = (stdout) => stdout.replace(/^agent-traffic: AGENT_TRAFFIC_ACCOUNT_SALT is not set.*\n/m, "");
 
 function fakeRequest({ method = "GET", baseUrl = "", route = null, headers = {} } = {}) {
   return { method, baseUrl, route: route === null ? undefined : { path: route }, headers, url: "/x" };
@@ -321,7 +323,7 @@ describe("agent-traffic.cjs as a file in a project", () => {
     writeFileSync(join(dir, ".env"), "AGENT_TRAFFIC_KEY=ark_root\nAGENT_TRAFFIC_PROJECT_ID=p\n");
     writeFileSync(join(dir, "apps/api/src/probe.cjs"), 'const { agentTraffic } = require("./agent-traffic.cjs"); console.log(typeof agentTraffic());');
     const other = project({});
-    assert.equal((await node(other, join(dir, "apps/api/src/probe.cjs"))).stdout, "function\n");
+    assert.equal(withoutSaltNote((await node(other, join(dir, "apps/api/src/probe.cjs"))).stdout), "function\n");
   });
 
   test("the environment wins over .env; with neither, it says what is missing", async () => {
@@ -334,7 +336,7 @@ describe("agent-traffic.cjs as a file in a project", () => {
 
   test("starts with only AGENT_TRAFFIC_KEY in .env: the project id is optional", async () => {
     const dir = project({ ".env": "AGENT_TRAFFIC_KEY=ark_only\n", "probe.cjs": 'const { agentTraffic } = require("./agent-traffic.cjs"); console.log(typeof agentTraffic());' });
-    assert.equal((await node(dir, "probe.cjs")).stdout, "function\n");
+    assert.equal(withoutSaltNote((await node(dir, "probe.cjs")).stdout), "function\n");
   });
 });
 
@@ -1089,6 +1091,120 @@ describe("endpoint and .env hardening", () => {
     writeFileSync(join(dir, "app/node_modules/@katrinalaszlo/track/package.json"), "{}");
     writeFileSync(join(dir, "app/.env"), "AGENT_TRAFFIC_KEY=ark_app\n");
     writeFileSync(join(dir, "app/probe.cjs"), `const { agentTraffic } = require(${JSON.stringify(join(pkg, "agent-traffic.cjs"))}); console.log(typeof agentTraffic());`);
-    assert.equal((await node(tempDir(), join(dir, "app/probe.cjs"))).stdout, "function\n");
+    assert.equal(withoutSaltNote((await node(tempDir(), join(dir, "app/probe.cjs"))).stdout), "function\n");
+  });
+});
+
+describe("ip_hash", () => {
+  const sent = [];
+
+  before(() => {
+    mock.method(globalThis, "fetch", async (url, init) => {
+      sent.push(...JSON.parse(init.body));
+      return { status: 202, json: async () => ({ accepted: 1, rejected: [] }) };
+    });
+    mock.timers.enable({ apis: ["setTimeout"] });
+  });
+  after(() => {
+    mock.timers.reset();
+    mock.restoreAll();
+  });
+
+  // The day key and the hash, written out independently of the module.
+  const expected = (address, salt, date) => {
+    const dayKey = createHmac("sha256", salt).update(`agent-traffic ip_hash v1 ${date}`).digest();
+    return createHmac("sha256", dayKey).update(address).digest("hex");
+  };
+  const at = "2026-10-24T13:05:00.000Z";
+
+  test("IPv4: HMAC-SHA256 under a key derived from the salt and the UTC date, as 64 lowercase hex characters", () => {
+    const hash = hashIp("203.0.113.7", "salt-1", at);
+    assert.equal(hash, expected("203.0.113.7", "salt-1", "2026-10-24"));
+    assert.match(hash, /^[0-9a-f]{64}$/);
+    assert.equal(hashIp("::ffff:203.0.113.7", "salt-1", at), hash, "an IPv4-mapped address is its IPv4 address");
+  });
+
+  test("the key changes every UTC day: the same IP hashes differently the next day, and with another salt", () => {
+    const today = hashIp("203.0.113.7", "salt-1", "2026-10-24T23:59:59.999Z");
+    assert.equal(hashIp("203.0.113.7", "salt-1", "2026-10-24T00:00:00.000Z"), today);
+    assert.notEqual(hashIp("203.0.113.7", "salt-1", "2026-10-25T00:00:00.000Z"), today);
+    assert.notEqual(hashIp("203.0.113.7", "salt-2", "2026-10-24T12:00:00.000Z"), today);
+  });
+
+  test("IPv6: only the /64 prefix is hashed, whatever the notation", () => {
+    const hash = hashIp("2001:db8:85a3:12::8a2e:370:7334", "s", at);
+    assert.equal(hash, expected("2001:db8:85a3:12::/64", "s", "2026-10-24"));
+    for (const same of ["2001:0db8:85a3:0012:ffff:ffff:ffff:ffff", "2001:DB8:85A3:12::1", "2001:db8:85a3:12:0:0:0:0", "2001:db8:85a3:12::1%eth0"]) {
+      assert.equal(hashIp(same, "s", at), hash, same);
+    }
+    assert.notEqual(hashIp("2001:db8:85a3:13::1", "s", at), hash, "another /64 is another hash");
+    assert.equal(hashIp("::1", "s", at), expected("0:0:0:0::/64", "s", "2026-10-24"));
+    assert.equal(hashIp("2001:db8::", "s", at), expected("2001:db8:0:0::/64", "s", "2026-10-24"));
+    assert.equal(hashIp("64:ff9b::192.0.2.33", "s", at), expected("64:ff9b:0:0::/64", "s", "2026-10-24"));
+  });
+
+  test("anything that is not an IP address gives no hash", () => {
+    for (const value of [undefined, "", "unknown", "203.0.113", "203.0.113.7, 10.0.0.1", "2001:db8::g"]) assert.equal(hashIp(value, "s", at), undefined, String(value));
+  });
+
+  function request(middleware, req) {
+    const res = new EventEmitter();
+    middleware(req, res, () => {});
+    res.statusCode = 200;
+    res.emit("finish");
+  }
+
+  test("with a salt, each event carries ip_hash of req.ip (what Express gives, trust proxy decides), never the IP or the salt", async () => {
+    sent.length = 0;
+    const middleware = agentTraffic({ key: "k", salt: "the-salt" });
+    const req = fakeRequest({ route: "/docs", headers: { "user-agent": "curl/8.7.1", "x-forwarded-for": "198.51.100.9" } });
+    req.ip = "198.51.100.9";
+    req.socket = { remoteAddress: "10.0.0.2" };
+    request(middleware, req);
+    const socketOnly = fakeRequest({ route: "/docs" });
+    socketOnly.socket = { remoteAddress: "::ffff:192.0.2.44" };
+    request(middleware, socketOnly);
+    mock.timers.tick(1000);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(sent.length, 2);
+    assert.equal(sent[0].ip_hash, hashIp("198.51.100.9", "the-salt", sent[0].occurred_at));
+    assert.equal(sent[1].ip_hash, hashIp("192.0.2.44", "the-salt", sent[1].occurred_at), "without req.ip, the connection's address");
+    const body = JSON.stringify(sent);
+    for (const secret of ["198.51.100.9", "10.0.0.2", "192.0.2.44", "the-salt"]) assert.equal(body.includes(secret), false, secret);
+  });
+
+  test("without a salt, no ip_hash is sent", async () => {
+    sent.length = 0;
+    const middleware = agentTraffic({ key: "k" });
+    const req = fakeRequest({ route: "/docs" });
+    req.ip = "198.51.100.9";
+    request(middleware, req);
+    mock.timers.tick(1000);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(sent.length, 1);
+    assert.equal("ip_hash" in sent[0], false);
+  });
+});
+
+describe("ip_hash startup line", () => {
+  const SOURCE = new URL("../skills/agent-traffic/agent-traffic.cjs", import.meta.url).pathname;
+  const dirs = [];
+  after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
+
+  test("without a salt it says once per process that no ip_hash is sent; with one it says nothing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-traffic-ip-"));
+    dirs.push(dir);
+    copyFileSync(SOURCE, join(dir, "agent-traffic.cjs"));
+    writeFileSync(join(dir, "probe.cjs"), [
+      'const { agentTraffic } = require("./agent-traffic.cjs");',
+      'const salt = process.argv[2];',
+      'agentTraffic({ key: "k", salt });',
+      'agentTraffic({ key: "k", salt });',
+    ].join("\n"));
+    const stdout = async (...args) => (await run(process.execPath, ["probe.cjs", ...args], { cwd: dir, env: { PATH: process.env.PATH } })).stdout;
+    const without = await stdout();
+    assert.equal(without.split("\n").filter(Boolean).length, 1);
+    assert.match(without, /^agent-traffic: AGENT_TRAFFIC_ACCOUNT_SALT is not set, so no ip_hash is sent/);
+    assert.equal(await stdout("a-salt"), "");
   });
 });

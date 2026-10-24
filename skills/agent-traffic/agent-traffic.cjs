@@ -30,6 +30,7 @@
 // and retried with the same keys.
 const { createHmac, randomBytes, randomUUID } = require("node:crypto");
 const { existsSync, readFileSync } = require("node:fs");
+const { isIP } = require("node:net");
 const { dirname, join, sep } = require("node:path");
 
 // The request and response header that carries a journey key.
@@ -118,6 +119,58 @@ function warnIfPlainHttp(endpoint) {
   if (["localhost", "127.0.0.1", "[::1]"].includes(host) || host.endsWith(".localhost")) return;
   warnedPlainHttp = true;
   console.error(`agent-traffic: the endpoint http://${host} is plain http, not https: the key and every event travel unencrypted. Use https outside local development.`);
+}
+
+// The client IP, hashed on this server, so Track can group an anonymous agent's requests (no cookie, no account) into one
+// visit. Only with AGENT_TRAFFIC_ACCOUNT_SALT set; the IP and the salt never leave the server. The key is
+// HMAC-SHA256(salt, "agent-traffic ip_hash v1 " + the UTC date of the request), so it changes every UTC day and the same
+// IP hashes differently from one day to the next: Track gets no identifier that lasts across days. ip_hash is
+// HMAC-SHA256(that day key, the address) as hex. An IPv6 address is hashed as its /64 prefix, because devices rotate
+// the rest of the address. The address is req.ip: with Express's "trust proxy" set, the client address from
+// X-Forwarded-For, else the address of the connection (the proxy's, behind one).
+const IP_HASH_CONTEXT = "agent-traffic ip_hash v1";
+
+// The four leading 16-bit groups of an IPv6 address isIP accepted, as lowercase hex without leading zeros.
+function ipv6Prefix64(address) {
+  let text = address.toLowerCase();
+  const ipv4Tail = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(text);
+  if (ipv4Tail) {
+    const [a, b, c, d] = ipv4Tail.slice(1).map(Number);
+    text = `${text.slice(0, ipv4Tail.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const halves = text.split("::");
+  const head = halves[0] === "" ? [] : halves[0].split(":");
+  const tail = halves.length === 1 || halves[1] === "" ? [] : halves[1].split(":");
+  const groups = halves.length === 1 ? head : [...head, ...Array(8 - head.length - tail.length).fill("0"), ...tail];
+  return groups.slice(0, 4).map((group) => parseInt(group, 16).toString(16));
+}
+
+// The text that is hashed: an IPv4 address as is (also when written as ::ffff:a.b.c.d), an IPv6 address as
+// "<first four groups>::/64". undefined when it is not an IP address.
+function ipForHash(ip) {
+  if (typeof ip !== "string") return undefined;
+  let address = ip.trim().split("%")[0];
+  if (/^::ffff:/i.test(address) && isIP(address.slice(7)) === 4) address = address.slice(7);
+  const version = isIP(address);
+  if (version === 4) return address;
+  if (version === 6) return `${ipv6Prefix64(address).join(":")}::/64`;
+  return undefined;
+}
+
+// occurredAt is the event's ISO time; its UTC date picks the day key.
+function hashIp(ip, salt, occurredAt) {
+  const address = ipForHash(ip);
+  if (address === undefined) return undefined;
+  const dayKey = createHmac("sha256", salt).update(`${IP_HASH_CONTEXT} ${occurredAt.slice(0, 10)}`).digest();
+  return createHmac("sha256", dayKey).update(address).digest("hex");
+}
+
+// Without the salt nothing is hashed and no ip_hash is sent. Said once per process.
+let toldNoIpHash = false;
+function tellNoIpHash() {
+  if (toldNoIpHash) return;
+  toldNoIpHash = true;
+  console.log("agent-traffic: AGENT_TRAFFIC_ACCOUNT_SALT is not set, so no ip_hash is sent: requests from agents that keep no cookies and never sign in are counted one visit per request. https://alg.katrinalaszlo.com/docs#hashed-client-ip");
 }
 
 // Web Bot Auth: when an agent signed its request (Signature and Signature-Input headers), the event carries what ingest
@@ -264,6 +317,7 @@ function agentTraffic({ accountIdOf, errorOf, pathOf, key, projectId, salt, endp
   if (!key) throw new Error("agentTraffic needs AGENT_TRAFFIC_KEY, in the environment or in .env. Run `npx agent-led-growth connect` to get one.");
   if (accountIdOf && !salt) throw new Error("agentTraffic needs AGENT_TRAFFIC_ACCOUNT_SALT, in the environment or in .env, to hash what accountIdOf returns.");
   warnIfPlainHttp(endpoint);
+  if (!salt) tellNoIpHash();
   const projectQuery = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
   const url = `${endpoint}/v1/events${projectQuery}`;
   const handoffsUrl = `${endpoint}/v1/handoffs${projectQuery}`;
@@ -302,7 +356,7 @@ function agentTraffic({ accountIdOf, errorOf, pathOf, key, projectId, salt, endp
           byReason.set(label, (byReason.get(label) ?? 0) + 1);
         }
         for (const [label, n] of byReason) {
-          const hint = label.startsWith("unknown_field") ? ". The agent traffic host does not know this field yet: it is older than this package (0.7.0). Upgrade the host, or pin @katrinalaszlo/track to 0.5.x. https://alg.katrinalaszlo.com/docs#event-fields" : "";
+          const hint = label.startsWith("unknown_field") ? ". The agent traffic host does not know this field yet: it is older than this package. Upgrade the host, or pin @katrinalaszlo/track to the version before that field (0.7.2 for ip_hash, 0.5.x for journey_id, path and handoff_token). https://alg.katrinalaszlo.com/docs#event-fields" : "";
           console.error(`agent-traffic: ${n} of ${batch.length} events rejected: ${label}${hint}`);
         }
         return;
@@ -501,6 +555,7 @@ function agentTraffic({ accountIdOf, errorOf, pathOf, key, projectId, salt, endp
       occurred_at: occurredAt,
       source: "sdk",
       account_id: accountId ? hashAccountId(accountId) : undefined,
+      ip_hash: salt ? hashIp(req.ip ?? req.socket?.remoteAddress, salt, occurredAt) : undefined,
       user_agent: req.headers["user-agent"],
       accept_language: req.headers["accept-language"],
       signature_agent: req.headers["signature-agent"],
@@ -536,4 +591,4 @@ function agentTraffic({ accountIdOf, errorOf, pathOf, key, projectId, salt, endp
   }
 }
 
-module.exports = { eventName, agentTraffic, signatureMaterial, redactPath, JOURNEY_HEADER, HANDOFF_PARAM };
+module.exports = { eventName, agentTraffic, signatureMaterial, redactPath, hashIp, JOURNEY_HEADER, HANDOFF_PARAM };

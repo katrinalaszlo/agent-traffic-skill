@@ -15,7 +15,10 @@ export interface AgentTrafficOptions {
   key?: string;
   /** Defaults to AGENT_TRAFFIC_PROJECT_ID from the environment or .env. Optional: without it, events go to the key's own project. */
   projectId?: string;
-  /** Defaults to AGENT_TRAFFIC_ACCOUNT_SALT from the environment or .env. Required when accountIdOf is set. */
+  /**
+   * Defaults to AGENT_TRAFFIC_ACCOUNT_SALT from the environment or .env. Required when accountIdOf is set. When set, each
+   * event also carries ip_hash, the client IP hashed under a key that changes every UTC day (see hashIp).
+   */
   salt?: string;
   /** Defaults to AGENT_TRAFFIC_ENDPOINT, else https://alg.katrinalaszlo.com. A plain http:// endpoint other than localhost logs one warning per process. */
   endpoint?: string;
@@ -95,3 +98,10 @@ export function eventName(req: any): string;
 
 /** The default path redaction: each segment that looks like a secret replaced by ":token". "/invite/<token>" -> "/invite/:token". */
 export function redactPath(path: string): string;
+
+/**
+ * The ip_hash an event carries: HMAC-SHA256, as hex, of the client IP (an IPv6 address as its /64 prefix) under a key
+ * derived from salt and the UTC date of occurredAt (an ISO 8601 string), so it changes every UTC day. undefined when ip
+ * is not an IP address. The middleware calls it with req.ip only when AGENT_TRAFFIC_ACCOUNT_SALT is set.
+ */
+export function hashIp(ip: string | undefined, salt: string, occurredAt: string): string | undefined;
