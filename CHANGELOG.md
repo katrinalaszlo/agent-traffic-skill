@@ -7,7 +7,8 @@
 - It is a heuristic: clients behind one NAT or cloud egress IP can share a visit, and IPv6 address rotation across networks splits one.
 - Behind a proxy, set Express's `trust proxy` so `req.ip` is the client's address; otherwise every request hashes the proxy's.
 
-Behaviour you may notice: a Track host that does not accept `ip_hash` yet rejects every event with `unknown_field (ip_hash)` while the salt is set. Upgrade the host, or stay on 0.7.2.
+- An older Track host that refuses `ip_hash` (an `unknown_field` rejection on it, or a 400 naming it) loses no event: the refused events are sent again without `ip_hash`, with the same idempotency keys, the process logs one line and stops sending `ip_hash` until it restarts.
+- Publishing is gated (issue #10): `prepublishOnly` runs `scripts/check-live-host.mjs`, which refuses unless https://alg.katrinalaszlo.com/openapi.json lists `ip_hash` in the `POST /v1/events` body. `TRACK_SKIP_LIVE_CHECK=1` skips it with a loud warning.
 
 ## 0.7.2 (2026-10-24)
 

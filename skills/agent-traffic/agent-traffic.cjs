@@ -173,6 +173,21 @@ function tellNoIpHash() {
   console.log("agent-traffic: AGENT_TRAFFIC_ACCOUNT_SALT is not set, so no ip_hash is sent: requests from agents that keep no cookies and never sign in are counted one visit per request. https://alg.katrinalaszlo.com/docs#hashed-client-ip");
 }
 
+// A Track host older than ip_hash rejects every event that carries it (unknown_field). The first time that happens,
+// the rejected events are sent again without it, with the same idempotency keys (a rejected event is not stored, so
+// the key is unused), and this process stops sending ip_hash: no event is lost to an older host. Said once.
+let ipHashUnsupported = false;
+function stopSendingIpHash() {
+  if (ipHashUnsupported) return;
+  ipHashUnsupported = true;
+  console.error("agent-traffic: the Track host does not accept ip_hash yet, so this process sends events without it from now on; the rejected events were sent again without it. Anonymous agent requests are counted one visit per request until the host is upgraded.");
+}
+function withoutIpHash(event) {
+  const copy = { ...event };
+  delete copy.ip_hash;
+  return copy;
+}
+
 // Web Bot Auth: when an agent signed its request (Signature and Signature-Input headers), the event carries what ingest
 // needs to check the signature: those two headers, the method and absolute URL, and only the other headers the
 // signature covers. Never a credential header, whatever the signer covered. An unsigned request adds nothing.
@@ -347,11 +362,20 @@ function agentTraffic({ accountIdOf, errorOf, pathOf, key, projectId, salt, endp
             console.error(`agent-traffic: ${warning}`);
           }
         }
+        // ip_hash refused by an older host: send those events again without it. A host too old to name the field
+        // counts when the event carried ip_hash.
+        const byKey = new Map(batch.map((event) => [event.idempotency_key, event]));
+        const refusesIpHash = (entry) => entry.reason === "unknown_field" && byKey.get(entry.idempotency_key)?.ip_hash !== undefined && (entry.field === "ip_hash" || entry.field === undefined);
+        const resend = body.rejected.filter(refusesIpHash).map((entry) => withoutIpHash(byKey.get(entry.idempotency_key)));
+        if (resend.length > 0) {
+          stopSendingIpHash();
+          send(resend, 1, timeoutMs);
+        }
         // One line per reason per batch, not one per event. An unknown field means this host is older than this
         // package: say which field and what to do, instead of a uuid per event.
         const byReason = new Map();
         for (const entry of body.rejected) {
-          if (entry.reason === "duplicate") continue;
+          if (entry.reason === "duplicate" || refusesIpHash(entry)) continue;
           const label = entry.reason === "unknown_field" ? `unknown_field (${entry.field ?? "?"})` : entry.reason;
           byReason.set(label, (byReason.get(label) ?? 0) + 1);
         }
@@ -362,6 +386,12 @@ function agentTraffic({ accountIdOf, errorOf, pathOf, key, projectId, salt, endp
         return;
       }
       failure = `${res.status} ${body.error}: ${body.message}`;
+      // A host that refuses the whole batch over ip_hash: the same, for every event.
+      if (res.status === 400 && `${body.error} ${body.message}`.includes("ip_hash") && batch.some((event) => event.ip_hash !== undefined)) {
+        stopSendingIpHash();
+        send(batch.map(withoutIpHash), 1, timeoutMs);
+        return;
+      }
       // A 4xx other than 429 will fail the same way again, so it is not retried.
       if (res.status < 500 && res.status !== 429) {
         console.error(`agent-traffic: batch of ${batch.length} dropped: ${failure}`);
@@ -555,7 +585,7 @@ function agentTraffic({ accountIdOf, errorOf, pathOf, key, projectId, salt, endp
       occurred_at: occurredAt,
       source: "sdk",
       account_id: accountId ? hashAccountId(accountId) : undefined,
-      ip_hash: salt ? hashIp(req.ip ?? req.socket?.remoteAddress, salt, occurredAt) : undefined,
+      ip_hash: salt && !ipHashUnsupported ? hashIp(req.ip ?? req.socket?.remoteAddress, salt, occurredAt) : undefined,
       user_agent: req.headers["user-agent"],
       accept_language: req.headers["accept-language"],
       signature_agent: req.headers["signature-agent"],

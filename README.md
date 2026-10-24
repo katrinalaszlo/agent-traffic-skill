@@ -64,7 +64,7 @@ The address is `req.ip`, as Express gives it. Behind a proxy or load balancer, s
 
 It is a heuristic: many clients behind one NAT or one cloud egress IP can look like one visitor, and an IPv6 client that moves to another network looks like a new one.
 
-Needs a Track host that accepts `ip_hash` (an older one rejects the events with `unknown_field (ip_hash)`; alg.katrinalaszlo.com does).
+A Track host that does not accept `ip_hash` yet loses no event: the middleware sends the refused events again without it, with the same idempotency keys, logs one line, and stops sending `ip_hash` for the rest of the process.
 
 ### Handoff links
 
@@ -123,6 +123,8 @@ From a clone of [katrinalaszlo/track-skill](https://github.com/katrinalaszlo/tra
 ```sh
 npm test
 ```
+
+`npm publish` first runs `scripts/check-live-host.mjs`, which refuses to publish unless the live Track host's `/openapi.json` lists `ip_hash` in the `POST /v1/events` body. `TRACK_SKIP_LIVE_CHECK=1` skips it, with a warning.
 
 Node 18 or later. No dependencies.
 
