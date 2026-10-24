@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.3 (Unreleased)
+## 0.7.3 (2026-10-24)
 
 - With `AGENT_TRAFFIC_ACCOUNT_SALT` set, each request's event carries `ip_hash`: HMAC-SHA256 of the client IP (`req.ip`; an IPv6 address as its /64 prefix) under a key derived from the salt and the UTC date, so it changes every UTC day. The IP and the salt never leave your server. Without the salt nothing changes, and the middleware prints one line at start saying no `ip_hash` is sent. New export `hashIp(ip, salt, occurredAt)`.
 - Purpose: Track groups the requests of an agent that keeps no cookies and never signs in (crawlers, docs fetchers) into one visit instead of one per request, for analytics only, and only for requests whose class is not human. Track keeps `ip_hash` 48 hours, never shows it, never forwards it to PostHog or GA4, and never logs it. There is no identifier that lasts across days.
