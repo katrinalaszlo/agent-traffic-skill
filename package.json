@@ -32,7 +32,8 @@
     "index.d.ts"
   ],
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "node scripts/check-live-host.mjs"
   },
   "engines": {
     "node": ">=18"

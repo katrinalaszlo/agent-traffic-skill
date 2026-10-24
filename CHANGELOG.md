@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.3 (Unreleased)
+
+- With `AGENT_TRAFFIC_ACCOUNT_SALT` set, each request's event carries `ip_hash`: HMAC-SHA256 of the client IP (`req.ip`; an IPv6 address as its /64 prefix) under a key derived from the salt and the UTC date, so it changes every UTC day. The IP and the salt never leave your server. Without the salt nothing changes, and the middleware prints one line at start saying no `ip_hash` is sent. New export `hashIp(ip, salt, occurredAt)`.
+- Purpose: Track groups the requests of an agent that keeps no cookies and never signs in (crawlers, docs fetchers) into one visit instead of one per request, for analytics only, and only for requests whose class is not human. Track keeps `ip_hash` 48 hours, never shows it, never forwards it to PostHog or GA4, and never logs it. There is no identifier that lasts across days.
+- It is a heuristic: clients behind one NAT or cloud egress IP can share a visit, and IPv6 address rotation across networks splits one.
+- Behind a proxy, set Express's `trust proxy` so `req.ip` is the client's address; otherwise every request hashes the proxy's.
+
+- An older Track host that refuses `ip_hash` (an `unknown_field` rejection on it, or a 400 naming it) loses no event: the refused events are sent again without `ip_hash`, with the same idempotency keys, the process logs one line and stops sending `ip_hash` until it restarts.
+- Publishing is gated (issue #10): `prepublishOnly` runs `scripts/check-live-host.mjs`, which refuses unless https://alg.katrinalaszlo.com/openapi.json lists `ip_hash` in the `POST /v1/events` body. `TRACK_SKIP_LIVE_CHECK=1` skips it with a loud warning.
+
 ## 0.7.2 (2026-10-24)
 
 Security hardening from the 2026-10-24 review. No API changes; existing code keeps working.
